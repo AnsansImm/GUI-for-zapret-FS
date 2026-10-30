@@ -25,6 +25,8 @@ struct App {
     confirm: Option<String>,
     last_edit: Option<std::time::Instant>,
     cursor_to_end: bool,
+    report: Vec<backend::Check>,
+    diagnostic_pending: bool,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -70,6 +72,8 @@ impl App {
             confirm: None,
             last_edit: None,
             cursor_to_end: false,
+            report: Vec::new(),
+            diagnostic_pending: false,
         };
         a.load();
         a
@@ -191,6 +195,7 @@ impl App {
         }
     }
     fn load(&mut self) {
+        self.report.clear();
         if let Some(root) = &self.config.root {
             self.strategy = backend::strategies(root)
                 .first()
@@ -231,6 +236,7 @@ impl App {
                     return;
                 }
             }
+            self.diagnostic_pending = action == "diagnostics";
             let strategy = self.strategy.clone();
             let (tx, rx) = mpsc::channel();
             self.rx = Some(rx);
@@ -238,6 +244,8 @@ impl App {
             std::thread::spawn(move || {
                 let result = if action == "status" {
                     backend::status()
+                } else if action == "diagnostics" {
+                    serde_json::to_string(&backend::diagnostics(&root)).unwrap_or_default()
                 } else {
                     backend::elevated(action, root, strategy)
                         .unwrap_or_else(|e| format!("Ошибка: {e}"))
@@ -262,7 +270,20 @@ impl eframe::App for App {
         }
         if let Some(rx) = &self.rx {
             if let Ok(s) = rx.try_recv() {
-                self.log = s;
+                if self.diagnostic_pending {
+                    match serde_json::from_str(&s) {
+                        Ok(report) => {
+                            self.report = report;
+                            self.log =
+                                "Диагностика завершена. Отчёт доступен на вкладке «Диагностика»."
+                                    .into();
+                        }
+                        Err(e) => self.log = format!("Ошибка отчёта диагностики: {e}"),
+                    }
+                    self.diagnostic_pending = false;
+                } else {
+                    self.log = s;
+                }
                 self.rx = None;
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -319,7 +340,7 @@ impl eframe::App for App {
         egui::SidePanel::left("nav")
             .default_width(170.)
             .show(ctx, |ui| {
-                for (i, n) in ["Управление", "Настройки", "Списки", "Тесты"]
+                for (i, n) in ["Управление", "Настройки", "Списки", "Тесты", "Диагностика"]
                     .iter()
                     .enumerate()
                 {
@@ -407,7 +428,25 @@ impl eframe::App for App {
  0=>{ui.heading("Служба Zapret");ui.label(format!("Выбрана стратегия: {}",self.strategy.trim_end_matches(".bat")));ui.add_space(12.);ui.horizontal(|ui|{for(action,label)in[("status","Обновить состояние"),("start","Запустить"),("stop","Остановить")]{if ui.button(label).clicked(){self.launch(action.into())}}});if ui.button("Установить / применить стратегию").clicked(){self.confirm=Some("install".into())}if ui.button("Удалить службу Zapret").clicked(){self.confirm=Some("remove".into())}ui.label("Установка задаёт автозапуск службы и включает TCP timestamps. Удаление касается только службы zapret.");},
  1=>{ui.heading("Game Filter");ui.horizontal_wrapped(|ui|{for(value,label)in[("disabled","Отключён"),("all","TCP и UDP"),("tcp","TCP"),("udp","UDP")]{ui.selectable_value(&mut self.mode,value.into(),label);}});ui.label("TCP: порты и диапазоны через запятую");ui.text_edit_singleline(&mut self.tcp);ui.label("UDP");ui.text_edit_singleline(&mut self.udp);if ui.button("Сохранить настройки").clicked(){if backend::valid_ports(&self.tcp)&&backend::valid_ports(&self.udp){let p=self.config.root.as_ref().unwrap().join("utils/game_filter.enabled");self.log=match fs::write(p,format!("mode={}\ntcp={}\nudp={}\n",self.mode,self.tcp,self.udp)){Ok(_)=>"Сохранено. Для службы повторно примените выбранную стратегию на вкладке «Управление».".into(),Err(e)=>e.to_string()};}else{self.log="Проверьте порты: допустимы значения 1–65535 и возрастающие диапазоны.".into()}}},
  2=>{self.editor_ui(ui,ctx);},
- _=>{ui.heading("Тестирование стратегий");ui.label("В этой версии тесты запускаются в оригинальном окне PowerShell. Скрипт может останавливать winws и временно менять IPSet. Перед запуском остановите службу Zapret.");if ui.button("Открыть оригинальные тесты…").clicked(){self.confirm=Some("tests".into())}ui.label("Отчёты: utils / test results в папке Zapret. Полностью графическое тестирование — следующий этап.");}
+ 3=>{ui.heading("Тестирование стратегий");ui.label("В этой версии тесты запускаются в оригинальном окне PowerShell. Скрипт может останавливать winws и временно менять IPSet. Перед запуском остановите службу Zapret.");if ui.button("Открыть оригинальные тесты…").clicked(){self.confirm=Some("tests".into())}ui.label("Отчёты: utils / test results в папке Zapret. Полностью графическое тестирование — следующий этап.");}
+ _=>{
+ ui.heading("Диагностика");
+ ui.label("Проверка не меняет настройки Windows и файлы Zapret. Предупреждения указывают на возможную причину, а не подтверждают неисправность.");
+ ui.horizontal(|ui| {
+ if ui.button("Запустить проверку").clicked() { self.launch("diagnostics".into()); }
+ if ui.add_enabled(!self.report.is_empty(),egui::Button::new("Копировать отчёт")).clicked() {
+ ui.ctx().copy_text(self.report.iter().map(|c|format!("[{}] {}: {}",c.level,c.title,c.detail)).collect::<Vec<_>>().join("\n"));
+ }
+ });
+ ui.separator();
+ if self.report.is_empty() { ui.weak("Проверка ещё не запускалась."); }
+ egui::ScrollArea::vertical().show(ui,|ui| {
+ for check in &self.report {
+ let (label,color)=match check.level.as_str(){"ok"=>("В порядке",egui::Color32::from_rgb(115,200,150)),"warn"=>("Внимание",egui::Color32::from_rgb(235,190,100)),"unknown"=>("Не проверено",egui::Color32::from_rgb(230,140,140)),_=>("Информация",egui::Color32::from_rgb(140,185,230))};
+ egui::Frame::group(ui.style()).show(ui,|ui|{ui.set_min_width(ui.available_width());ui.horizontal_wrapped(|ui|{ui.strong(&check.title);ui.colored_label(color,label);});ui.label(&check.detail);});
+ }
+ });
+ }
  }});});
         if let Some(action) = self.confirm.clone() {
             egui::Window::new("Подтверждение действия").collapsible(false).resizable(false).show(ctx,|ui|{ui.label(match action.as_str(){"install"=>"Применить выбранную стратегию? Текущая служба будет остановлена и перенастроена.","remove"=>"Остановить и удалить службу zapret? Файлы сохранятся.",_=>"Запустить оригинальный тест с правами администратора? Он управляет процессами winws и IPSet."});ui.horizontal(|ui|{if ui.button("Выполнить").clicked(){self.confirm=None;if action=="tests"{let p=self.config.root.as_ref().unwrap().join("utils/test zapret.ps1");let script=format!("Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{}\"'",p.display().to_string().replace('\'',"''"));self.log=match backend::command("powershell.exe").args(["-NoProfile","-Command",&script]).spawn(){Ok(_)=>"Запрошен запуск тестов в отдельном окне".into(),Err(e)=>e.to_string()};}else{self.launch(action.clone())}}if ui.button("Отмена").clicked(){self.confirm=None;}});});

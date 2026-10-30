@@ -267,3 +267,123 @@ mod tests {
         }
     }
 }
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct Check {
+    pub level: String,
+    pub title: String,
+    pub detail: String,
+}
+pub fn diagnostics(root: &Path) -> Vec<Check> {
+    let mut checks = Vec::new();
+    for (file, title) in [
+        ("service.bat", "Менеджер сборки"),
+        ("bin/winws.exe", "Исполняемый файл Zapret"),
+        ("bin/WinDivert64.sys", "Драйвер WinDivert"),
+        ("lists/list-general-user.txt", "Пользовательский список"),
+        ("lists/list-exclude-user.txt", "Пользовательские исключения"),
+    ] {
+        let present = root.join(file).is_file();
+        checks.push(Check {
+            level: if present { "ok" } else { "warn" }.into(),
+            title: title.into(),
+            detail: format!(
+                "{} — {}",
+                file,
+                if present {
+                    "найден"
+                } else {
+                    "не найден"
+                }
+            ),
+        });
+    }
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$rows = @()
+function Add-Check($level, $title, $detail) {
+    $script:rows += [pscustomobject]@{level=$level;title=$title;detail=$detail}
+}
+foreach ($item in @(@('zapret','Служба Zapret'),@('WinDivert','Служба WinDivert'),@('BFE','Базовая фильтрация Windows'))) {
+    try {
+        $s = Get-Service -Name $item[0] -ErrorAction Stop
+        $level = if ($s.Status -eq 'Running') {'ok'} else {'warn'}
+        Add-Check $level $item[1] ($s.Status.ToString())
+    } catch {
+        Add-Check 'warn' $item[1] 'Не найдена или недоступна для проверки'
+    }
+}
+try {
+    $p = @(Get-Process -Name winws -ErrorAction SilentlyContinue)
+    if ($p.Count -gt 0) { Add-Check 'ok' 'Процесс winws' ('Запущен; количество: '+$p.Count) }
+    else { Add-Check 'warn' 'Процесс winws' 'Не запущен' }
+    if (Get-Process -Name AdguardSvc -ErrorAction SilentlyContinue) {
+        Add-Check 'warn' 'AdGuard' 'Обнаружен AdguardSvc. Возможен конфликт с Discord; это не означает, что конфликт подтверждён.'
+    } else { Add-Check 'ok' 'AdGuard' 'Процесс AdguardSvc не обнаружен' }
+} catch { Add-Check 'unknown' 'Процессы' $_.Exception.Message }
+try {
+    $all = @(Get-Service -ErrorAction Stop)
+    $conflicts = @($all | Where-Object { $_.Name -match 'Killer|TracSrvWrapper|EPWD|SmartByte|VPN|HappService' -or $_.DisplayName -match 'Intel.*Connectivity.*Network' })
+    if ($conflicts.Count -gt 0) {
+        Add-Check 'warn' 'Возможные конфликты' (($conflicts | ForEach-Object { $_.DisplayName+' ['+$_.Status+']' }) -join '; ')
+    } else { Add-Check 'ok' 'Возможные конфликты' 'Известные имена конфликтующих служб не обнаружены. Проверка не гарантирует отсутствие конфликтов.' }
+} catch { Add-Check 'unknown' 'Возможные конфликты' $_.Exception.Message }
+try {
+    $proxy = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+    if ($proxy.ProxyEnable -eq 1) { Add-Check 'warn' 'Системный прокси' ('Включён: '+$proxy.ProxyServer) }
+    else { Add-Check 'ok' 'Системный прокси' 'Прокси текущего пользователя отключён' }
+} catch { Add-Check 'unknown' 'Системный прокси' $_.Exception.Message }
+try {
+    $hosts = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+    $found = @(Get-Content -LiteralPath $hosts | Where-Object { $_ -notmatch '^\s*#' -and $_ -match '(?i)(^|\s)(\S+\.)?(youtube\.com|youtu\.be)(\s|$)' })
+    if ($found.Count -gt 0) { Add-Check 'warn' 'Файл hosts' 'Найдены активные записи YouTube. Они могут влиять на доступность сайта.' }
+    else { Add-Check 'ok' 'Файл hosts' 'Активные записи YouTube не обнаружены' }
+} catch { Add-Check 'unknown' 'Файл hosts' $_.Exception.Message }
+try {
+    $strategy = Get-ItemPropertyValue 'HKLM:\SYSTEM\CurrentControlSet\Services\zapret' -Name 'zapret-discord-youtube' -ErrorAction Stop
+    Add-Check 'info' 'Установленная стратегия' $strategy
+} catch { Add-Check 'info' 'Установленная стратегия' 'Имя стратегии в реестре не найдено или недоступно' }
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+ConvertTo-Json -InputObject @($rows) -Compress -Depth 4
+"#;
+    match run(
+        "powershell.exe",
+        &["-NoProfile", "-NonInteractive", "-Command", script],
+    ) {
+        Ok(json) => {
+            match serde_json::from_str::<Vec<Check>>(json.trim_start_matches('\u{feff}').trim()) {
+                Ok(mut rows) => checks.append(&mut rows),
+                Err(e) => checks.push(Check {
+                    level: "unknown".into(),
+                    title: "Системная проверка".into(),
+                    detail: format!("Не удалось прочитать отчёт: {e}"),
+                }),
+            }
+        }
+        Err(e) => checks.push(Check {
+            level: "unknown".into(),
+            title: "Системная проверка".into(),
+            detail: e,
+        }),
+    }
+    checks
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    #[test]
+    fn read_only_report_is_structured() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("zapret-discord-youtube-1.10.4");
+        let report = super::diagnostics(&root);
+        assert!(
+            report.iter().any(|r| r.title == "Служба Zapret"),
+            "{}",
+            serde_json::to_string(&report).unwrap()
+        );
+        assert!(report.iter().any(|r| r.title == "Файл hosts"));
+        assert!(report
+            .iter()
+            .all(|r| !r.title.is_empty() && !r.detail.is_empty()));
+    }
+}
