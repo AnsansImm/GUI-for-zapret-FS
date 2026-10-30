@@ -437,30 +437,6 @@ impl App {
                     ui.weak(&s.strategy);
                 }
             }
-            let enabled = self.rx.is_none() && !self.tests.busy() && !self.tests.needs_recovery();
-            let service = self.snapshot.as_ref().is_some_and(|s| s.service_exists);
-            let running = self.snapshot.as_ref().is_some_and(|s| s.service_running);
-            if self
-                .snapshot
-                .as_ref()
-                .is_some_and(|s| s.winws && !s.service_running)
-            {
-                ui.weak("Служба не используется. Запущен отдельный winws.");
-            } else {
-                if ui
-                    .add_enabled(
-                        enabled && service,
-                        egui::Button::new(if running {
-                            "Остановить службу"
-                        } else {
-                            "Запустить службу"
-                        }),
-                    )
-                    .clicked()
-                {
-                    self.launch(if running { "stop" } else { "start" }.into());
-                }
-            }
             if ui
                 .add_enabled(
                     self.snapshot_rx.is_none(),
@@ -510,31 +486,59 @@ impl App {
         if standalone {
             ui.colored_label(egui::Color32::from_rgb(229,188,120),"Zapret работает отдельно. Перед установкой или сменой стратегии службы завершите отдельный запуск winws.");
         }
-        ui.add_enabled_ui(!standalone, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(
-                                if self.snapshot.as_ref().is_some_and(|s| s.service_exists) {
-                                    "Применить и перезапустить…"
-                                } else {
-                                    "Установить и запустить…"
-                                },
-                            )
-                            .color(egui::Color32::from_rgb(18, 34, 54)),
-                        )
-                        .fill(egui::Color32::from_rgb(119, 184, 250)),
+        let service = self.snapshot.as_ref().is_some_and(|s| s.service_exists);
+        let running = self.snapshot.as_ref().is_some_and(|s| s.service_running);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    !standalone,
+                    egui::Button::new(
+                        egui::RichText::new(if service {
+                            "Применить и перезапустить…"
+                        } else {
+                            "Установить и запустить…"
+                        })
+                        .color(egui::Color32::from_rgb(18, 34, 54)),
                     )
-                    .clicked()
-                {
-                    self.confirm = Some("install".into());
-                }
-                if ui.button("Подробное состояние").clicked() {
-                    self.launch("status".into());
-                }
-            });
+                    .fill(egui::Color32::from_rgb(119, 184, 250)),
+                )
+                .clicked()
+            {
+                self.confirm = Some("install".into());
+            }
+            if ui
+                .add_enabled(
+                    standalone || running,
+                    egui::Button::new("Остановить Zapret"),
+                )
+                .clicked()
+            {
+                self.launch(
+                    if standalone {
+                        "stop_standalone"
+                    } else {
+                        "stop"
+                    }
+                    .into(),
+                );
+            }
         });
+        ui.add_space(6.);
+        if ui
+            .add_enabled(
+                service && !running && !standalone,
+                egui::Button::new("Запустить службу"),
+            )
+            .clicked()
+        {
+            self.launch("start".into());
+        }
+        if !service {
+            ui.weak("Сначала установите службу выбранной стратегией.");
+        }
+        if ui.button("Подробное состояние").clicked() {
+            self.launch("status".into());
+        }
         ui.add_space(12.);
         ui.separator();
         ui.label("Папка Zapret");

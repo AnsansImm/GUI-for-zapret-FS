@@ -128,6 +128,19 @@ pub fn helper(action: &str, root: &Path, strategy: &str) -> Result<String, Strin
         }
     }
     match action {
+        "stop_standalone" => {
+            let exe = root
+                .join("bin/winws.exe")
+                .to_string_lossy()
+                .replace('\'', "''");
+            let script = format!(
+                r#"$ErrorActionPreference='Stop';$expected=[IO.Path]::GetFullPath('{exe}');$services=@(Get-CimInstance Win32_Service -Filter 'ProcessId > 0' -OperationTimeoutSec 8|Select-Object -ExpandProperty ProcessId);$targets=@(Get-CimInstance Win32_Process -Filter "Name='winws.exe'" -OperationTimeoutSec 8|Where-Object{{$_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath).Equals($expected,[StringComparison]::OrdinalIgnoreCase) -and $_.ProcessId -notin $services}});foreach($p in $targets){{$current=Get-CimInstance Win32_Process -Filter ('ProcessId='+$p.ProcessId) -OperationTimeoutSec 8;if($current -and $current.CreationDate -eq $p.CreationDate){{$process=Get-Process -Id $p.ProcessId -ErrorAction Stop;$process.Kill();if(-not $process.WaitForExit(10000)){{throw 'winws did not stop'}}}}}};[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false);Write-Output ('Остановлено отдельных процессов Zapret: '+$targets.Count)"#
+            );
+            run(
+                "powershell.exe",
+                &["-NoProfile", "-NonInteractive", "-Command", &script],
+            )
+        }
         "fix_bfe" => run("sc.exe", &["start", "BFE"]),
         "fix_timestamps" => run(
             "netsh.exe",
