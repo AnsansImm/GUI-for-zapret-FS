@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod backend;
 mod editor;
+mod fakes;
 mod ipset;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,7 @@ struct App {
     cursor_to_end: bool,
     report: Vec<backend::Check>,
     diagnostic_pending: bool,
+    fake_confirm: Option<(String, String)>,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -75,6 +77,7 @@ impl App {
             cursor_to_end: false,
             report: Vec::new(),
             diagnostic_pending: false,
+            fake_confirm: None,
         };
         a.load();
         a
@@ -197,6 +200,7 @@ impl App {
     }
     fn load(&mut self) {
         self.report.clear();
+        self.fake_confirm = None;
         if let Some(root) = &self.config.root {
             self.strategy = backend::strategies(root)
                 .first()
@@ -226,6 +230,59 @@ impl App {
                         _ => {}
                     }
                 }
+            }
+        }
+    }
+    fn fakes_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Активные fake-файлы");
+        ui.label("Выберите содержимое для Discord UDP или Game Filter UDP. Список соответствует .bin-файлам сборки. Перед заменой сохраняется предыдущий файл; применение требует перезапуска Zapret.");
+        let root = self.config.root.as_ref().unwrap();
+        match fakes::available(root) {
+            Ok(files) => {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.columns(2, |columns| {
+                        for (column, (target, label)) in columns.iter_mut().zip(fakes::TARGETS) {
+                            column.heading(label);
+                            let active = fakes::current(root, target, &files);
+                            column.label(format!(
+                                "Текущий: {}",
+                                if active.is_empty() {
+                                    "Не совпадает с файлами сборки"
+                                } else {
+                                    &active
+                                }
+                            ));
+                            if column
+                                .add_enabled(
+                                    root.join("bin").join(format!("{target}.backup")).is_file(),
+                                    egui::Button::new("Восстановить предыдущий"),
+                                )
+                                .clicked()
+                            {
+                                self.fake_confirm = Some((target.into(), String::new()));
+                            }
+                            column.separator();
+                            if files.is_empty() {
+                                column.weak("Доступные .bin-файлы не найдены");
+                            }
+                            for name in &files {
+                                if column
+                                    .add_sized(
+                                        [column.available_width(), 30.],
+                                        egui::Button::new(name)
+                                            .selected(active.split(", ").any(|n| n == name)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.fake_confirm = Some((target.into(), name.clone()));
+                                }
+                            }
+                        }
+                    });
+                });
+            }
+            Err(e) => {
+                ui.label(format!("Не удалось прочитать fake-файлы: {e}"));
             }
         }
     }
@@ -290,6 +347,17 @@ impl App {
             std::thread::spawn(move || {
                 let result = if action == "status" {
                     backend::status()
+                } else if let Some(rest) = action.strip_prefix("fake:") {
+                    if let Some((target, source)) = rest.split_once(':') {
+                        let result = if source.is_empty() {
+                            fakes::restore(&root, target)
+                        } else {
+                            fakes::replace(&root, target, source)
+                        };
+                        result.unwrap_or_else(|e| format!("Ошибка fake-файла: {e}"))
+                    } else {
+                        "Неверная операция fake-файла".into()
+                    }
                 } else if let Some(mode) = action.strip_prefix("ipset:") {
                     let result = if mode == "update" {
                         ipset::update(&root)
@@ -403,9 +471,16 @@ impl eframe::App for App {
         egui::SidePanel::left("nav")
             .default_width(170.)
             .show(ctx, |ui| {
-                for (i, n) in ["Управление", "Настройки", "Списки", "Тесты", "Диагностика"]
-                    .iter()
-                    .enumerate()
+                for (i, n) in [
+                    "Управление",
+                    "Настройки",
+                    "Списки",
+                    "Тесты",
+                    "Диагностика",
+                    "Fake-файлы",
+                ]
+                .iter()
+                .enumerate()
                 {
                     ui.selectable_value(&mut self.tab, i, *n);
                 }
@@ -492,7 +567,7 @@ impl eframe::App for App {
  1=>{ui.heading("Game Filter");ui.horizontal_wrapped(|ui|{for(value,label)in[("disabled","Отключён"),("all","TCP и UDP"),("tcp","TCP"),("udp","UDP")]{ui.selectable_value(&mut self.mode,value.into(),label);}});ui.label("TCP: порты и диапазоны через запятую");ui.text_edit_singleline(&mut self.tcp);ui.label("UDP");ui.text_edit_singleline(&mut self.udp);if ui.button("Сохранить настройки").clicked(){if backend::valid_ports(&self.tcp)&&backend::valid_ports(&self.udp){let p=self.config.root.as_ref().unwrap().join("utils/game_filter.enabled");self.log=match fs::write(p,format!("mode={}\ntcp={}\nudp={}\n",self.mode,self.tcp,self.udp)){Ok(_)=>"Сохранено. Для службы повторно примените выбранную стратегию на вкладке «Управление».".into(),Err(e)=>e.to_string()};}else{self.log="Проверьте порты: допустимы значения 1–65535 и возрастающие диапазоны.".into()}}self.ipset_ui(ui);},
  2=>{self.editor_ui(ui,ctx);},
  3=>{ui.heading("Тестирование стратегий");ui.label("В этой версии тесты запускаются в оригинальном окне PowerShell. Скрипт может останавливать winws и временно менять IPSet. Перед запуском остановите службу Zapret.");if ui.button("Открыть оригинальные тесты…").clicked(){self.confirm=Some("tests".into())}ui.label("Отчёты: utils / test results в папке Zapret. Полностью графическое тестирование — следующий этап.");}
- _=>{
+ 4=>{
  ui.heading("Диагностика");
  ui.label("Проверка не меняет настройки Windows и файлы Zapret. Предупреждения указывают на возможную причину, а не подтверждают неисправность.");
  ui.horizontal(|ui| {
@@ -510,7 +585,18 @@ impl eframe::App for App {
  }
  });
  }
+ _=>{self.fakes_ui(ui);}
  }});});
+        if let Some((target, source)) = self.fake_confirm.clone() {
+            egui::Window::new("Замена fake-файла").collapsible(false).resizable(false).show(ctx,|ui|{
+                ui.label(if source.is_empty(){format!("Восстановить предыдущий {target} из резервной копии?")}else{format!("Заменить {target} содержимым {source}? Предыдущий файл будет сохранён в .backup.")});
+                ui.label("Для применения потребуется перезапуск Zapret.");
+                ui.horizontal(|ui|{
+                    if ui.button("Выполнить").clicked(){self.fake_confirm=None;self.launch(format!("fake:{target}:{source}"));}
+                    if ui.button("Отмена").clicked(){self.fake_confirm=None;}
+                });
+            });
+        }
         if let Some(action) = self.confirm.clone() {
             egui::Window::new("Подтверждение действия").collapsible(false).resizable(false).show(ctx,|ui|{ui.label(match action.as_str(){"install"=>"Применить выбранную стратегию? Текущая служба будет остановлена и перенастроена.","remove"=>"Остановить и удалить службу zapret? Файлы сохранятся.",_=>"Запустить оригинальный тест с правами администратора? Он управляет процессами winws и IPSet."});ui.horizontal(|ui|{if ui.button("Выполнить").clicked(){self.confirm=None;if action=="tests"{let p=self.config.root.as_ref().unwrap().join("utils/test zapret.ps1");let script=format!("Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{}\"'",p.display().to_string().replace('\'',"''"));self.log=match backend::command("powershell.exe").args(["-NoProfile","-Command",&script]).spawn(){Ok(_)=>"Запрошен запуск тестов в отдельном окне".into(),Err(e)=>e.to_string()};}else{self.launch(action.clone())}}if ui.button("Отмена").clicked(){self.confirm=None;}});});
         }
