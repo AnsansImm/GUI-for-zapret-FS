@@ -440,18 +440,26 @@ impl App {
             let enabled = self.rx.is_none() && !self.tests.busy() && !self.tests.needs_recovery();
             let service = self.snapshot.as_ref().is_some_and(|s| s.service_exists);
             let running = self.snapshot.as_ref().is_some_and(|s| s.service_running);
-            if ui
-                .add_enabled(
-                    enabled && service,
-                    egui::Button::new(if running {
-                        "Остановить службу"
-                    } else {
-                        "Запустить службу"
-                    }),
-                )
-                .clicked()
+            if self
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.winws && !s.service_running)
             {
-                self.launch(if running { "stop" } else { "start" }.into());
+                ui.weak("Служба не используется. Запущен отдельный winws.");
+            } else {
+                if ui
+                    .add_enabled(
+                        enabled && service,
+                        egui::Button::new(if running {
+                            "Остановить службу"
+                        } else {
+                            "Запустить службу"
+                        }),
+                    )
+                    .clicked()
+                {
+                    self.launch(if running { "stop" } else { "start" }.into());
+                }
             }
             if ui
                 .add_enabled(
@@ -495,22 +503,37 @@ impl App {
                 ui.weak("После применения служба запускается автоматически вместе с Windows.");
             });
         ui.add_space(12.);
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add(
-                    egui::Button::new(
-                        egui::RichText::new("Применить стратегию…")
+        let standalone = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.winws && !s.service_running);
+        if standalone {
+            ui.colored_label(egui::Color32::from_rgb(229,188,120),"Zapret работает отдельно. Перед установкой или сменой стратегии службы завершите отдельный запуск winws.");
+        }
+        ui.add_enabled_ui(!standalone, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(
+                                if self.snapshot.as_ref().is_some_and(|s| s.service_exists) {
+                                    "Применить и перезапустить…"
+                                } else {
+                                    "Установить и запустить…"
+                                },
+                            )
                             .color(egui::Color32::from_rgb(18, 34, 54)),
+                        )
+                        .fill(egui::Color32::from_rgb(119, 184, 250)),
                     )
-                    .fill(egui::Color32::from_rgb(119, 184, 250)),
-                )
-                .clicked()
-            {
-                self.confirm = Some("install".into());
-            }
-            if ui.button("Подробное состояние").clicked() {
-                self.launch("status".into());
-            }
+                    .clicked()
+                {
+                    self.confirm = Some("install".into());
+                }
+                if ui.button("Подробное состояние").clicked() {
+                    self.launch("status".into());
+                }
+            });
         });
         ui.add_space(12.);
         ui.separator();

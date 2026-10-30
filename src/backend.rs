@@ -121,6 +121,12 @@ pub fn valid_ports(s: &str) -> bool {
         })
 }
 pub fn helper(action: &str, root: &Path, strategy: &str) -> Result<String, String> {
+    if matches!(action, "start" | "install") {
+        let state = snapshot()?;
+        if state.winws && !state.service_running {
+            return Err("Zapret уже запущен отдельно. Завершите отдельный winws перед запуском или перенастройкой службы.".into());
+        }
+    }
     match action {
         "fix_bfe" => run("sc.exe", &["start", "BFE"]),
         "fix_timestamps" => run(
