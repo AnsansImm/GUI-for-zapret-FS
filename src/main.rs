@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod backend;
+mod editor;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, sync::mpsc};
@@ -22,6 +23,8 @@ struct App {
     tcp: String,
     udp: String,
     confirm: Option<String>,
+    last_edit: Option<std::time::Instant>,
+    cursor_to_end: bool,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -65,9 +68,127 @@ impl App {
             tcp: "1024-65535".into(),
             udp: "1024-65535".into(),
             confirm: None,
+            last_edit: None,
+            cursor_to_end: false,
         };
         a.load();
         a
+    }
+    fn save_editor(&mut self) -> bool {
+        if self.last_edit.is_none() {
+            return true;
+        }
+        let Some(path) = &self.selected else {
+            return true;
+        };
+        let content = editor::normalize(&self.text, editor::is_ip(path));
+        if content == self.disk {
+            self.last_edit = None;
+            return true;
+        }
+        match fs::read_to_string(path) {
+            Ok(current) if current == self.disk => match fs::write(path, &content) {
+                Ok(()) => {
+                    self.disk = content;
+                    self.last_edit = None;
+                    self.log = "Изменения сохранены".into();
+                    true
+                }
+                Err(e) => {
+                    self.log = format!("Ошибка сохранения: {e}");
+                    false
+                }
+            },
+            _ => {
+                self.log = "Файл изменён извне или недоступен. Изменения остаются в редакторе; переход и закрытие отменены. Скопируйте текст перед повторным открытием файла.".into();
+                false
+            }
+        }
+    }
+    fn open_list(&mut self, path: PathBuf) {
+        if !self.save_editor() {
+            return;
+        }
+        match fs::read_to_string(&path) {
+            Ok(text) => {
+                self.text = editor::editable(&text, editor::is_ip(&path));
+                self.disk = text;
+                self.selected = Some(path);
+                self.last_edit = None;
+                self.cursor_to_end = true;
+            }
+            Err(e) => self.log = e.to_string(),
+        }
+    }
+    fn editor_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Редактор списков");
+        let Some(path) = self.selected.clone() else {
+            ui.label("Выберите лист в колонке слева");
+            return;
+        };
+        let ip = editor::is_ip(&path);
+        ui.label(path.file_name().unwrap().to_string_lossy());
+        ui.label(if ip {
+            "IPSet: адреса IPv4/IPv6 и подсети (/). Пробел — новая строка; # — комментарий."
+        } else {
+            "Домены: a–z, 0–9, -, ., _, *. Пробел — новая строка; # — комментарий."
+        });
+        ui.weak("Автосохранение через 400 мс после ввода");
+        let id = ui.make_persistent_id(("list_editor", &path));
+        let output = egui::ScrollArea::vertical()
+            .id_salt(&path)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::TextEdit::multiline(&mut self.text)
+                    .id(id)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(22)
+                    .font(egui::TextStyle::Monospace)
+                    .show(ui)
+            })
+            .inner;
+        if self.cursor_to_end {
+            let mut state = output.state.clone();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(self.text.chars().count()),
+                )));
+            state.store(ctx, id);
+            output.response.request_focus();
+            self.cursor_to_end = false;
+            ctx.request_repaint();
+        }
+        if output.response.changed() {
+            // Translate cursor positions through filtering, including Unicode comments.
+            let range = output.cursor_range.map(|r| r.as_ccursor_range());
+            let raw = self.text.clone();
+            self.text = editor::editable(&raw, ip);
+            if let Some(mut range) = range {
+                let map = |index: usize| {
+                    editor::normalize(&raw.chars().take(index).collect::<String>(), ip)
+                        .chars()
+                        .count()
+                        + usize::from(
+                            index > 0
+                                && raw.chars().nth(index - 1).is_some_and(char::is_whitespace)
+                                && !raw
+                                    .lines()
+                                    .last()
+                                    .unwrap_or("")
+                                    .trim_start()
+                                    .starts_with('#'),
+                        )
+                };
+                range.primary.index = map(range.primary.index).min(self.text.chars().count());
+                range.secondary.index = map(range.secondary.index).min(self.text.chars().count());
+                let mut state = output.state;
+                state.cursor.set_char_range(Some(range));
+                state.store(ctx, id);
+            }
+            self.last_edit = Some(std::time::Instant::now());
+            self.log = "Изменения будут сохранены…".into();
+        }
     }
     fn load(&mut self) {
         if let Some(root) = &self.config.root {
@@ -128,6 +249,17 @@ impl App {
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.save_editor() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+        if let Some(time) = self.last_edit {
+            let delay = std::time::Duration::from_millis(400);
+            if time.elapsed() >= delay {
+                self.save_editor();
+            } else {
+                ctx.request_repaint_after(delay - time.elapsed());
+            }
+        }
         if let Some(rx) = &self.rx {
             if let Ok(s) = rx.try_recv() {
                 self.log = s;
@@ -144,6 +276,9 @@ impl eframe::App for App {
                 {
                     if let Some(p) = rfd::FileDialog::new().pick_folder() {
                         if p.join("service.bat").is_file() && p.join("bin/winws.exe").is_file() {
+                            if !self.save_editor() {
+                                return;
+                            }
                             self.config.root = Some(p);
                             self.selected = None;
                             self.load();
@@ -258,14 +393,7 @@ impl eframe::App for App {
                                             )
                                             .clicked()
                                         {
-                                            match fs::read_to_string(&path) {
-                                                Ok(text) => {
-                                                    self.text = text.clone();
-                                                    self.disk = text;
-                                                    self.selected = Some(path);
-                                                }
-                                                Err(e) => self.log = e.to_string(),
-                                            }
+                                            self.open_list(path);
                                         }
                                     }
                                     ui.separator();
@@ -278,7 +406,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx,|ui|{ui.add_enabled_ui(self.rx.is_none()&&self.config.root.is_some(),|ui|{match self.tab{
  0=>{ui.heading("Служба Zapret");ui.label(format!("Выбрана стратегия: {}",self.strategy.trim_end_matches(".bat")));ui.add_space(12.);ui.horizontal(|ui|{for(action,label)in[("status","Обновить состояние"),("start","Запустить"),("stop","Остановить")]{if ui.button(label).clicked(){self.launch(action.into())}}});if ui.button("Установить / применить стратегию").clicked(){self.confirm=Some("install".into())}if ui.button("Удалить службу Zapret").clicked(){self.confirm=Some("remove".into())}ui.label("Установка задаёт автозапуск службы и включает TCP timestamps. Удаление касается только службы zapret.");},
  1=>{ui.heading("Game Filter");ui.horizontal_wrapped(|ui|{for(value,label)in[("disabled","Отключён"),("all","TCP и UDP"),("tcp","TCP"),("udp","UDP")]{ui.selectable_value(&mut self.mode,value.into(),label);}});ui.label("TCP: порты и диапазоны через запятую");ui.text_edit_singleline(&mut self.tcp);ui.label("UDP");ui.text_edit_singleline(&mut self.udp);if ui.button("Сохранить настройки").clicked(){if backend::valid_ports(&self.tcp)&&backend::valid_ports(&self.udp){let p=self.config.root.as_ref().unwrap().join("utils/game_filter.enabled");self.log=match fs::write(p,format!("mode={}\ntcp={}\nudp={}\n",self.mode,self.tcp,self.udp)){Ok(_)=>"Сохранено. Для службы повторно примените выбранную стратегию на вкладке «Управление».".into(),Err(e)=>e.to_string()};}else{self.log="Проверьте порты: допустимы значения 1–65535 и возрастающие диапазоны.".into()}}},
- 2=>{ui.heading("Редактор списков");if let Some(path)=&self.selected {ui.label(path.file_name().unwrap().to_string_lossy());}else{ui.label("Выберите лист в колонке слева");}ui.label("Автосохранение. Комментарии начинаются с #. Исходный текст сохраняется без фильтрации.");if self.selected.is_some(){let response=egui::ScrollArea::vertical().show(ui,|ui|ui.add(egui::TextEdit::multiline(&mut self.text).desired_width(f32::INFINITY).desired_rows(22).font(egui::TextStyle::Monospace))).inner;if response.changed(){let p=self.selected.as_ref().unwrap();match fs::read_to_string(p){Ok(current)if current==self.disk=>{match fs::write(p,&self.text){Ok(_)=>{self.disk=self.text.clone();self.log="Сохранено".into()},Err(e)=>self.log=e.to_string()}},_=>{self.log="Файл изменён другой программой. Повторно выберите его перед редактированием. Ваш текст остаётся в редакторе.".into();}}}}},
+ 2=>{self.editor_ui(ui,ctx);},
  _=>{ui.heading("Тестирование стратегий");ui.label("В этой версии тесты запускаются в оригинальном окне PowerShell. Скрипт может останавливать winws и временно менять IPSet. Перед запуском остановите службу Zapret.");if ui.button("Открыть оригинальные тесты…").clicked(){self.confirm=Some("tests".into())}ui.label("Отчёты: utils / test results в папке Zapret. Полностью графическое тестирование — следующий этап.");}
  }});});
         if let Some(action) = self.confirm.clone() {
