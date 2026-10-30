@@ -122,6 +122,11 @@ pub fn valid_ports(s: &str) -> bool {
 }
 pub fn helper(action: &str, root: &Path, strategy: &str) -> Result<String, String> {
     match action {
+        "fix_bfe" => run("sc.exe", &["start", "BFE"]),
+        "fix_timestamps" => run(
+            "netsh.exe",
+            &["interface", "tcp", "set", "global", "timestamps=enabled"],
+        ),
         "start" => run("sc.exe", &["start", "zapret"]),
         "stop" => run("sc.exe", &["stop", "zapret"]),
         "install" => {
@@ -313,6 +318,10 @@ foreach ($item in @(@('zapret','Служба Zapret'),@('WinDivert','Служб�
         Add-Check 'warn' $item[1] 'Не найдена или недоступна для проверки'
     }
 }
+try {
+    $tcp = @(Get-NetTCPSetting -ErrorAction Stop | Select-Object -ExpandProperty Timestamps -Unique)
+    Add-Check 'info' 'TCP timestamps' ('Настройки TCP-профилей: '+($tcp -join ', ')+'. Кнопка ниже включает глобальный параметр, как service.bat.')
+} catch { Add-Check 'unknown' 'TCP timestamps' ('Не удалось прочитать состояние: '+$_.Exception.Message) }
 try {
     $p = @(Get-Process -Name winws -ErrorAction SilentlyContinue)
     if ($p.Count -gt 0) { Add-Check 'ok' 'Процесс winws' ('Запущен; количество: '+$p.Count) }

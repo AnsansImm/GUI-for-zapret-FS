@@ -31,6 +31,7 @@ struct App {
     cursor_to_end: bool,
     report: Vec<backend::Check>,
     diagnostic_pending: bool,
+    repair_pending: bool,
     fake_confirm: Option<(String, String)>,
     tests: testing::Tests,
     updates: updates::Updates,
@@ -81,6 +82,7 @@ impl App {
             cursor_to_end: false,
             report: Vec::new(),
             diagnostic_pending: false,
+            repair_pending: false,
             fake_confirm: None,
             tests: testing::Tests::new(),
             updates: updates::Updates::default(),
@@ -614,6 +616,7 @@ impl App {
                 return;
             }
             self.diagnostic_pending = action == "diagnostics";
+            self.repair_pending = action.starts_with("fix_");
             let strategy = self.strategy.clone();
             let (tx, rx) = mpsc::channel();
             self.rx = Some(rx);
@@ -639,6 +642,11 @@ impl App {
                         ipset::set_mode(&root, mode)
                     };
                     result.unwrap_or_else(|e| format!("Ошибка IPSet: {e}"))
+                } else if action.starts_with("fix_") {
+                    let result = backend::elevated(action, root.clone(), strategy)
+                        .unwrap_or_else(|e| format!("Ошибка исправления: {e}"));
+                    serde_json::to_string(&(result, backend::diagnostics(&root)))
+                        .unwrap_or_default()
                 } else if action == "diagnostics" {
                     serde_json::to_string(&backend::diagnostics(&root)).unwrap_or_default()
                 } else {
@@ -678,7 +686,16 @@ impl eframe::App for App {
         }
         if let Some(rx) = &self.rx {
             if let Ok(s) = rx.try_recv() {
-                if self.diagnostic_pending {
+                if self.repair_pending {
+                    match serde_json::from_str::<(String, Vec<backend::Check>)>(&s) {
+                        Ok((result, checks)) => {
+                            self.log = result;
+                            self.report = checks;
+                        }
+                        Err(e) => self.log = format!("Ошибка результата исправления: {e}"),
+                    }
+                    self.repair_pending = false;
+                } else if self.diagnostic_pending {
                     match serde_json::from_str(&s) {
                         Ok(report) => {
                             self.report = report;
@@ -872,7 +889,9 @@ impl eframe::App for App {
  egui::ScrollArea::vertical().show(ui,|ui| {
  for check in &self.report {
  let (label,color)=match check.level.as_str(){"ok"=>("В порядке",egui::Color32::from_rgb(115,200,150)),"warn"=>("Внимание",egui::Color32::from_rgb(235,190,100)),"unknown"=>("Не проверено",egui::Color32::from_rgb(230,140,140)),_=>("Информация",egui::Color32::from_rgb(140,185,230))};
- egui::Frame::group(ui.style()).show(ui,|ui|{ui.set_min_width(ui.available_width());ui.horizontal_wrapped(|ui|{ui.strong(&check.title);ui.colored_label(color,label);});ui.label(&check.detail);});
+ egui::Frame::group(ui.style()).show(ui,|ui|{ui.set_min_width(ui.available_width());ui.horizontal_wrapped(|ui|{ui.strong(&check.title);ui.colored_label(color,label);});ui.label(&check.detail);
+if check.title=="Базовая фильтрация Windows" && check.level=="warn" && ui.button("Запустить BFE…").clicked(){self.confirm=Some("fix_bfe".into());}
+if check.title=="TCP timestamps" && ui.button("Включить TCP timestamps…").clicked(){self.confirm=Some("fix_timestamps".into());}});
  }
  });
  }
@@ -890,7 +909,7 @@ impl eframe::App for App {
             });
         }
         if let Some(action) = self.confirm.clone() {
-            egui::Window::new("Подтверждение действия").collapsible(false).resizable(false).show(ctx,|ui|{ui.label(match action.as_str(){"install"=>"Применить выбранную стратегию? Текущая служба будет остановлена и перенастроена.","remove"=>"Остановить и удалить службу zapret? Файлы сохранятся.",_=>"Запустить оригинальный тест с правами администратора? Он управляет процессами winws и IPSet."});ui.horizontal(|ui|{if ui.button("Выполнить").clicked(){self.confirm=None;if action=="tests"{let p=self.config.root.as_ref().unwrap().join("utils/test zapret.ps1");let script=format!("Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{}\"'",p.display().to_string().replace('\'',"''"));self.log=match backend::command("powershell.exe").args(["-NoProfile","-Command",&script]).spawn(){Ok(_)=>"Запрошен запуск тестов в отдельном окне".into(),Err(e)=>e.to_string()};}else{self.launch(action.clone())}}if ui.button("Отмена").clicked(){self.confirm=None;}});});
+            egui::Window::new("Подтверждение действия").collapsible(false).resizable(false).show(ctx,|ui|{ui.label(match action.as_str(){"install"=>"Применить выбранную стратегию? Текущая служба будет остановлена и перенастроена.","remove"=>"Остановить и удалить службу zapret? Файлы сохранятся.","fix_bfe"=>"Запустить службу базовой фильтрации Windows (BFE)? Она нужна для работы WinDivert. Тип запуска службы не меняется.","fix_timestamps"=>"Включить глобальный параметр TCP timestamps в Windows, как это делает service.bat? Это системная настройка для всех приложений.",_=>"Запустить оригинальный тест с правами администратора? Он управляет процессами winws и IPSet."});ui.horizontal(|ui|{if ui.button("Выполнить").clicked(){self.confirm=None;if action=="tests"{let p=self.config.root.as_ref().unwrap().join("utils/test zapret.ps1");let script=format!("Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{}\"'",p.display().to_string().replace('\'',"''"));self.log=match backend::command("powershell.exe").args(["-NoProfile","-Command",&script]).spawn(){Ok(_)=>"Запрошен запуск тестов в отдельном окне".into(),Err(e)=>e.to_string()};}else{self.launch(action.clone())}}if ui.button("Отмена").clicked(){self.confirm=None;}});});
         }
     }
 }
