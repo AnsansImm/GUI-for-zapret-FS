@@ -328,40 +328,96 @@ impl App {
             );
         }
         let mut apply = None;
+        ui.horizontal_wrapped(|ui| {
+            for (label, color) in [
+                ("OK — успешно", egui::Color32::from_rgb(110, 210, 150)),
+                (
+                    "ERROR / SSL/DNS — ошибка",
+                    egui::Color32::from_rgb(245, 120, 120),
+                ),
+                (
+                    "UNSUP — не поддерживается",
+                    egui::Color32::from_rgb(235, 190, 100),
+                ),
+                ("— — не проверялось", egui::Color32::GRAY),
+            ] {
+                ui.colored_label(color, label);
+            }
+        });
         egui::ScrollArea::both()
             .id_salt("test_results")
             .show(ui, |ui| {
-                egui::Grid::new("test_table").striped(true).show(ui, |ui| {
-                    for label in [
-                        "Стратегия",
-                        "Цель",
-                        "HTTP",
-                        "TLS 1.2",
-                        "TLS 1.3",
-                        "Ping",
-                        "",
-                    ] {
-                        ui.strong(label);
+                let mut groups: Vec<(&str, Vec<&testing::Row>)> = Vec::new();
+                for row in &self.tests.report.rows {
+                    if let Some((_, rows)) =
+                        groups.iter_mut().find(|(name, _)| *name == row.strategy)
+                    {
+                        rows.push(row);
+                    } else {
+                        groups.push((&row.strategy, vec![row]));
                     }
-                    ui.end_row();
-                    for row in &self.tests.report.rows {
-                        ui.label(&row.strategy);
-                        ui.label(&row.target);
-                        for value in [&row.http, &row.tls12, &row.tls13, &row.ping] {
-                            ui.label(value);
-                        }
-                        if ui
-                            .add_enabled(
-                                !busy && !self.tests.needs_recovery(),
-                                egui::Button::new("Применить…"),
-                            )
-                            .clicked()
-                        {
-                            apply = Some(row.strategy.clone());
-                        }
-                        ui.end_row();
-                    }
-                });
+                }
+                for (name, rows) in groups {
+                    let values = rows
+                        .iter()
+                        .flat_map(|r| [r.http.as_str(), r.tls12.as_str(), r.tls13.as_str()])
+                        .collect::<Vec<_>>();
+                    let ok = values.iter().filter(|v| **v == "OK").count();
+                    let errors = values
+                        .iter()
+                        .filter(|v| matches!(**v, "ERROR" | "SSL/DNS" | "START ERROR"))
+                        .count();
+                    let unsupported = values.iter().filter(|v| **v == "UNSUP").count();
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        egui::CollapsingHeader::new(egui::RichText::new(name).strong())
+                            .id_salt(("strategy_results", name))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.colored_label(result_color("OK"), format!("Успешно: {ok}"));
+                                    ui.colored_label(
+                                        result_color("ERROR"),
+                                        format!("Ошибок: {errors}"),
+                                    );
+                                    ui.colored_label(
+                                        result_color("UNSUP"),
+                                        format!("Не поддерживается: {unsupported}"),
+                                    );
+                                    if ui
+                                        .add_enabled(
+                                            !busy
+                                                && !self.tests.needs_recovery()
+                                                && !rows.iter().any(|r| r.http == "START ERROR"),
+                                            egui::Button::new("Применить стратегию…"),
+                                        )
+                                        .clicked()
+                                    {
+                                        apply = Some(name.to_owned());
+                                    }
+                                });
+                                egui::Grid::new(("strategy_table", name))
+                                    .striped(true)
+                                    .spacing([18., 8.])
+                                    .show(ui, |ui| {
+                                        for label in ["Цель", "HTTP", "TLS 1.2", "TLS 1.3", "Ping"]
+                                        {
+                                            ui.strong(label);
+                                        }
+                                        ui.end_row();
+                                        for row in &rows {
+                                            ui.label(&row.target);
+                                            for value in
+                                                [&row.http, &row.tls12, &row.tls13, &row.ping]
+                                            {
+                                                ui.colored_label(result_color(value), value);
+                                            }
+                                            ui.end_row();
+                                        }
+                                    });
+                            });
+                    });
+                    ui.add_space(8.);
+                }
             });
         if let Some(name) = apply {
             self.strategy = name;
@@ -761,6 +817,16 @@ impl eframe::App for App {
         if let Some(action) = self.confirm.clone() {
             egui::Window::new("Подтверждение действия").collapsible(false).resizable(false).show(ctx,|ui|{ui.label(match action.as_str(){"install"=>"Применить выбранную стратегию? Текущая служба будет остановлена и перенастроена.","remove"=>"Остановить и удалить службу zapret? Файлы сохранятся.",_=>"Запустить оригинальный тест с правами администратора? Он управляет процессами winws и IPSet."});ui.horizontal(|ui|{if ui.button("Выполнить").clicked(){self.confirm=None;if action=="tests"{let p=self.config.root.as_ref().unwrap().join("utils/test zapret.ps1");let script=format!("Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{}\"'",p.display().to_string().replace('\'',"''"));self.log=match backend::command("powershell.exe").args(["-NoProfile","-Command",&script]).spawn(){Ok(_)=>"Запрошен запуск тестов в отдельном окне".into(),Err(e)=>e.to_string()};}else{self.launch(action.clone())}}if ui.button("Отмена").clicked(){self.confirm=None;}});});
         }
+    }
+}
+fn result_color(value: &str) -> egui::Color32 {
+    match value {
+        "OK" => egui::Color32::from_rgb(110, 210, 150),
+        "ERROR" | "SSL/DNS" | "START ERROR" => egui::Color32::from_rgb(245, 120, 120),
+        "UNSUP" | "Timeout" => egui::Color32::from_rgb(235, 190, 100),
+        "—" => egui::Color32::GRAY,
+        _ if value.ends_with(" ms") => egui::Color32::from_rgb(130, 195, 235),
+        _ => egui::Color32::LIGHT_GRAY,
     }
 }
 fn main() -> eframe::Result<()> {
