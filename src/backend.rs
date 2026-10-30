@@ -319,8 +319,29 @@ foreach ($item in @(@('zapret','Служба Zapret'),@('WinDivert','Служб�
     }
 }
 try {
-    $tcp = @(Get-NetTCPSetting -ErrorAction Stop | Select-Object -ExpandProperty Timestamps -Unique)
-    Add-Check 'info' 'TCP timestamps' ('Настройки TCP-профилей: '+($tcp -join ', ')+'. Кнопка ниже включает глобальный параметр, как service.bat.')
+    $global = @(& netsh.exe interface tcp show global 2>&1)
+    $exitCode = $LASTEXITCODE
+    $line = $global | Where-Object { [string]$_ -match '(?i)timestamps|RFC\s*1323|временн.*мет|мет.*времен' } | Select-Object -First 1
+    if ($exitCode -eq 0 -and $line) {
+        $value = ([string]$line -split ':',2)[1].Trim()
+        if ($value -match '^(?i:enabled|включено|включен|включён)$') {
+            Add-Check 'ok' 'TCP timestamps' 'Глобальный параметр включён. Стратегии с fooling=ts могут его использовать.'
+        } elseif ($value -match '^(?i:disabled|отключено|отключен|отключён)$') {
+            Add-Check 'warn' 'TCP timestamps' 'Глобальный параметр отключён. Для стратегий с fooling=ts его нужно включить.'
+        } else {
+            Add-Check 'info' 'TCP timestamps' ('Глобальное состояние: '+$value)
+        }
+    } else {
+        # Read raw CIM values: the Automatic profile has null here, and the
+        # Get-NetTCPSetting enum adapter throws when converting that null.
+        $settings = @(Get-CimInstance -Namespace root/StandardCimv2 -ClassName MSFT_NetTCPSetting -OperationTimeoutSec 8 -ErrorAction Stop)
+        $profiles = @($settings | Where-Object { $null -ne $_.Timestamps } | ForEach-Object {
+            $value = switch ([int]$_.Timestamps) { 0 {'отключено'} 1 {'включено'} default {[string]$_.Timestamps} }
+            $_.SettingName+': '+$value
+        })
+        if ($profiles.Count -eq 0) { throw 'Windows не вернула значение timestamps' }
+        Add-Check 'info' 'TCP timestamps' ('Профили TCP: '+($profiles -join '; ')+'. Глобальное состояние netsh не распознано.')
+    }
 } catch { Add-Check 'unknown' 'TCP timestamps' ('Не удалось прочитать состояние: '+$_.Exception.Message) }
 try {
     $p = @(Get-Process -Name winws -ErrorAction SilentlyContinue)
