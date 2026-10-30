@@ -346,6 +346,7 @@ impl App {
         });
         egui::ScrollArea::both()
             .id_salt("test_results")
+            .stick_to_bottom(true)
             .show(ui, |ui| {
                 let mut groups: Vec<(&str, Vec<&testing::Row>)> = Vec::new();
                 for row in &self.tests.report.rows {
