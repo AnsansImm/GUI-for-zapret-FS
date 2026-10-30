@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod backend;
 mod editor;
+mod ipset;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, sync::mpsc};
@@ -228,6 +229,48 @@ impl App {
             }
         }
     }
+    fn ipset_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(20.);
+        ui.separator();
+        ui.heading("IPSet Filter");
+        let root = self.config.root.as_ref().unwrap();
+        let state = ipset::status(root);
+        let current = state.as_ref().copied().unwrap_or("unknown");
+        ui.label(format!(
+            "Текущий режим: {}",
+            match current {
+                "loaded" => "По списку",
+                "none" => "Отключён",
+                "any" => "Любые IP",
+                _ => "Не удалось прочитать список",
+            }
+        ));
+        if let Err(e) = state {
+            ui.weak(e);
+        }
+        ui.label("По списку — IPSet-правила используют адреса из файла. Отключён — файл содержит служебный адрес. Любые IP — файл пустой, IPSet-правила могут охватывать любые адреса.");
+        ui.horizontal_wrapped(|ui| {
+            for (mode, label) in [
+                ("loaded", "По списку"),
+                ("none", "Отключён"),
+                ("any", "Любые IP"),
+            ] {
+                if ui
+                    .add_enabled(
+                        current != mode,
+                        egui::Button::new(label).selected(current == mode),
+                    )
+                    .clicked()
+                {
+                    self.launch(format!("ipset:{mode}"));
+                }
+            }
+        });
+        if ui.button("Обновить список Flowseal").clicked() {
+            self.launch("ipset:update".into());
+        }
+        ui.weak("Резервная копия: lists/ipset-all.txt.backup. Обновление сохраняет выбранный режим. Настройка относится к IPSet-правилам стратегии; доменные правила работают отдельно.");
+    }
     fn launch(&mut self, action: String) {
         if let Some(root) = self.config.root.clone() {
             if action == "install" {
@@ -235,6 +278,9 @@ impl App {
                     self.log = e;
                     return;
                 }
+            }
+            if action.starts_with("ipset:") && !self.save_editor() {
+                return;
             }
             self.diagnostic_pending = action == "diagnostics";
             let strategy = self.strategy.clone();
@@ -244,6 +290,13 @@ impl App {
             std::thread::spawn(move || {
                 let result = if action == "status" {
                     backend::status()
+                } else if let Some(mode) = action.strip_prefix("ipset:") {
+                    let result = if mode == "update" {
+                        ipset::update(&root)
+                    } else {
+                        ipset::set_mode(&root, mode)
+                    };
+                    result.unwrap_or_else(|e| format!("Ошибка IPSet: {e}"))
                 } else if action == "diagnostics" {
                     serde_json::to_string(&backend::diagnostics(&root)).unwrap_or_default()
                 } else {
@@ -283,6 +336,16 @@ impl eframe::App for App {
                     self.diagnostic_pending = false;
                 } else {
                     self.log = s;
+                    if self
+                        .selected
+                        .as_ref()
+                        .is_some_and(|p| p.file_name().is_some_and(|n| n == "ipset-all.txt"))
+                        && self.last_edit.is_none()
+                    {
+                        if let Some(p) = self.selected.clone() {
+                            self.open_list(p);
+                        }
+                    }
                 }
                 self.rx = None;
             }
@@ -426,7 +489,7 @@ impl eframe::App for App {
         }
         egui::CentralPanel::default().show(ctx,|ui|{ui.add_enabled_ui(self.rx.is_none()&&self.config.root.is_some(),|ui|{match self.tab{
  0=>{ui.heading("Служба Zapret");ui.label(format!("Выбрана стратегия: {}",self.strategy.trim_end_matches(".bat")));ui.add_space(12.);ui.horizontal(|ui|{for(action,label)in[("status","Обновить состояние"),("start","Запустить"),("stop","Остановить")]{if ui.button(label).clicked(){self.launch(action.into())}}});if ui.button("Установить / применить стратегию").clicked(){self.confirm=Some("install".into())}if ui.button("Удалить службу Zapret").clicked(){self.confirm=Some("remove".into())}ui.label("Установка задаёт автозапуск службы и включает TCP timestamps. Удаление касается только службы zapret.");},
- 1=>{ui.heading("Game Filter");ui.horizontal_wrapped(|ui|{for(value,label)in[("disabled","Отключён"),("all","TCP и UDP"),("tcp","TCP"),("udp","UDP")]{ui.selectable_value(&mut self.mode,value.into(),label);}});ui.label("TCP: порты и диапазоны через запятую");ui.text_edit_singleline(&mut self.tcp);ui.label("UDP");ui.text_edit_singleline(&mut self.udp);if ui.button("Сохранить настройки").clicked(){if backend::valid_ports(&self.tcp)&&backend::valid_ports(&self.udp){let p=self.config.root.as_ref().unwrap().join("utils/game_filter.enabled");self.log=match fs::write(p,format!("mode={}\ntcp={}\nudp={}\n",self.mode,self.tcp,self.udp)){Ok(_)=>"Сохранено. Для службы повторно примените выбранную стратегию на вкладке «Управление».".into(),Err(e)=>e.to_string()};}else{self.log="Проверьте порты: допустимы значения 1–65535 и возрастающие диапазоны.".into()}}},
+ 1=>{ui.heading("Game Filter");ui.horizontal_wrapped(|ui|{for(value,label)in[("disabled","Отключён"),("all","TCP и UDP"),("tcp","TCP"),("udp","UDP")]{ui.selectable_value(&mut self.mode,value.into(),label);}});ui.label("TCP: порты и диапазоны через запятую");ui.text_edit_singleline(&mut self.tcp);ui.label("UDP");ui.text_edit_singleline(&mut self.udp);if ui.button("Сохранить настройки").clicked(){if backend::valid_ports(&self.tcp)&&backend::valid_ports(&self.udp){let p=self.config.root.as_ref().unwrap().join("utils/game_filter.enabled");self.log=match fs::write(p,format!("mode={}\ntcp={}\nudp={}\n",self.mode,self.tcp,self.udp)){Ok(_)=>"Сохранено. Для службы повторно примените выбранную стратегию на вкладке «Управление».".into(),Err(e)=>e.to_string()};}else{self.log="Проверьте порты: допустимы значения 1–65535 и возрастающие диапазоны.".into()}}self.ipset_ui(ui);},
  2=>{self.editor_ui(ui,ctx);},
  3=>{ui.heading("Тестирование стратегий");ui.label("В этой версии тесты запускаются в оригинальном окне PowerShell. Скрипт может останавливать winws и временно менять IPSet. Перед запуском остановите службу Zapret.");if ui.button("Открыть оригинальные тесты…").clicked(){self.confirm=Some("tests".into())}ui.label("Отчёты: utils / test results в папке Zapret. Полностью графическое тестирование — следующий этап.");}
  _=>{
