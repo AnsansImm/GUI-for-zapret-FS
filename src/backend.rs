@@ -417,3 +417,19 @@ mod diagnostic_tests {
             .all(|r| !r.title.is_empty() && !r.detail.is_empty()));
     }
 }
+
+#[derive(Default, serde::Deserialize)]
+pub struct Snapshot {
+    pub service_exists: bool,
+    pub service_running: bool,
+    pub winws: bool,
+    pub strategy: String,
+}
+pub fn snapshot() -> Result<Snapshot, String> {
+    let script = r#"$ErrorActionPreference='Stop';$s=Get-Service zapret -ErrorAction SilentlyContinue;$strategy='';try{$strategy=[string](Get-ItemPropertyValue 'HKLM:\SYSTEM\CurrentControlSet\Services\zapret' -Name 'zapret-discord-youtube' -ErrorAction Stop)}catch{};[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false);@{service_exists=[bool]$s;service_running=[bool]($s -and $s.Status -eq 'Running');winws=[bool](Get-Process winws -ErrorAction SilentlyContinue);strategy=$strategy}|ConvertTo-Json -Compress"#;
+    let data = run(
+        "powershell.exe",
+        &["-NoProfile", "-NonInteractive", "-Command", script],
+    )?;
+    serde_json::from_str(data.trim_start_matches('\u{feff}').trim()).map_err(|e| e.to_string())
+}

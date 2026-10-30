@@ -61,7 +61,12 @@ pub struct Tests {
 }
 impl Tests {
     pub fn new() -> Self {
-        let dir = std::env::current_exe().unwrap().with_file_name("test-run");
+        let dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("runtime")
+            .join("test-run");
         let mut s = Self {
             selected: Default::default(),
             report: Default::default(),
@@ -151,6 +156,9 @@ impl Tests {
             range_bytes: self.range_bytes.clamp(16384, 1048576),
             dpi_host: self.dpi_host.trim().into(),
         };
+        if let Some(parent) = self.dir.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
         if self.dir.exists() {
             let archive = self.dir.with_file_name(format!(
                 "test-report-{}",

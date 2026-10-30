@@ -39,6 +39,10 @@ struct App {
     updates: updates::Updates,
     browser_kind: String,
     extension_id: String,
+    snapshot: Option<backend::Snapshot>,
+    snapshot_rx: Option<mpsc::Receiver<Result<backend::Snapshot, String>>>,
+    snapshot_time: Option<std::time::Instant>,
+    snapshot_error: String,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -46,8 +50,17 @@ impl App {
         let mut style = (*cc.egui_ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(10., 10.);
         style.spacing.button_padding = egui::vec2(14., 9.);
-        style.visuals.selection.bg_fill = egui::Color32::from_rgb(38, 91, 135);
-        style.visuals.panel_fill = egui::Color32::from_rgb(24, 28, 35);
+        style.visuals.panel_fill = egui::Color32::from_rgb(23, 27, 34);
+        style.visuals.window_fill = egui::Color32::from_rgb(30, 36, 45);
+        style.visuals.extreme_bg_color = egui::Color32::from_rgb(20, 26, 34);
+        style.visuals.faint_bg_color = egui::Color32::from_rgb(32, 40, 51);
+        style.visuals.selection.bg_fill = egui::Color32::from_rgb(42, 65, 94);
+        style.visuals.selection.stroke.color = egui::Color32::from_rgb(193, 222, 255);
+        style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(43, 52, 66);
+        style.visuals.widgets.inactive.rounding = egui::Rounding::same(7.);
+        style.visuals.widgets.hovered.rounding = egui::Rounding::same(7.);
+        style.visuals.widgets.active.rounding = egui::Rounding::same(7.);
+        style.visuals.window_rounding = egui::Rounding::same(10.);
         cc.egui_ctx.set_style(style);
         let config_path = std::env::current_exe()
             .unwrap()
@@ -92,6 +105,10 @@ impl App {
             updates: updates::Updates::default(),
             browser_kind: "Chrome / Opera".into(),
             extension_id: String::new(),
+            snapshot: None,
+            snapshot_rx: None,
+            snapshot_time: None,
+            snapshot_error: String::new(),
         };
         a.load();
         a
@@ -270,6 +287,275 @@ impl App {
                     }
                 }
             }
+        }
+    }
+    fn workspace(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        match self.tab {
+            0 => {
+                self.management_ui(ui);
+            }
+            1 => {
+                ui.heading("Game Filter");
+                ui.horizontal_wrapped(|ui| {
+                    for (value, label) in [
+                        ("disabled", "Отключён"),
+                        ("all", "TCP и UDP"),
+                        ("tcp", "TCP"),
+                        ("udp", "UDP"),
+                    ] {
+                        ui.selectable_value(&mut self.mode, value.into(), label);
+                    }
+                });
+                ui.label("TCP: порты и диапазоны через запятую");
+                ui.text_edit_singleline(&mut self.tcp);
+                ui.label("UDP");
+                ui.text_edit_singleline(&mut self.udp);
+                if ui.button("Сохранить настройки").clicked() {
+                    if backend::valid_ports(&self.tcp) && backend::valid_ports(&self.udp) {
+                        let p = self
+                            .config
+                            .root
+                            .as_ref()
+                            .unwrap()
+                            .join("utils/game_filter.enabled");
+                        self.log=match fs::write(p,format!("mode={}\ntcp={}\nudp={}\n",self.mode,self.tcp,self.udp)){Ok(_)=>"Сохранено. Для службы повторно примените выбранную стратегию на вкладке «Управление».".into(),Err(e)=>e.to_string()};
+                    } else {
+                        self.log =
+                            "Проверьте порты: допустимы значения 1–65535 и возрастающие диапазоны."
+                                .into()
+                    }
+                }
+                self.ipset_ui(ui);
+            }
+            2 => {
+                self.editor_ui(ui, ctx);
+            }
+            3 => {
+                self.tests_ui(ui);
+            }
+            4 => {
+                ui.heading("Диагностика");
+                ui.label("Проверка не меняет настройки Windows и файлы Zapret. Предупреждения указывают на возможную причину, а не подтверждают неисправность.");
+                ui.horizontal(|ui| {
+                    if ui.button("Запустить проверку").clicked() {
+                        self.launch("diagnostics".into());
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.report.is_empty(),
+                            egui::Button::new("Копировать отчёт"),
+                        )
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(
+                            self.report
+                                .iter()
+                                .map(|c| format!("[{}] {}: {}", c.level, c.title, c.detail))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        );
+                    }
+                });
+                ui.separator();
+                if self.report.is_empty() {
+                    ui.weak("Проверка ещё не запускалась.");
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for check in &self.report {
+                        let (label, color) = match check.level.as_str() {
+                            "ok" => ("В порядке", egui::Color32::from_rgb(115, 200, 150)),
+                            "warn" => ("Внимание", egui::Color32::from_rgb(235, 190, 100)),
+                            "unknown" => ("Не проверено", egui::Color32::from_rgb(230, 140, 140)),
+                            _ => ("Информация", egui::Color32::from_rgb(140, 185, 230)),
+                        };
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.horizontal_wrapped(|ui| {
+                                ui.strong(&check.title);
+                                ui.colored_label(color, label);
+                            });
+                            ui.label(&check.detail);
+                            if check.title == "Базовая фильтрация Windows"
+                                && check.level == "warn"
+                                && ui.button("Запустить BFE…").clicked()
+                            {
+                                self.confirm = Some("fix_bfe".into());
+                            }
+                            if check.title == "TCP timestamps"
+                                && ui.button("Включить TCP timestamps…").clicked()
+                            {
+                                self.confirm = Some("fix_timestamps".into());
+                            }
+                        });
+                    }
+                });
+            }
+            5 => {
+                self.fakes_ui(ui);
+            }
+            6 => {
+                self.updates_ui(ui);
+            }
+            _ => {
+                self.browser_ui(ui);
+            }
+        }
+    }
+    fn refresh_snapshot(&mut self) {
+        if self.snapshot_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.snapshot_rx = Some(rx);
+        self.snapshot_time = Some(std::time::Instant::now());
+        std::thread::spawn(move || {
+            let _ = tx.send(backend::snapshot());
+        });
+    }
+    fn status_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.heading(egui::RichText::new("Z").color(egui::Color32::from_rgb(119, 184, 250)));
+            ui.heading("Zapret GUI");
+            ui.add_space(18.);
+            let (text, color) = match &self.snapshot {
+                Some(s) if s.service_running => {
+                    ("● Zapret работает", egui::Color32::from_rgb(155, 223, 177))
+                }
+                Some(s) if s.winws => (
+                    "● Zapret запущен отдельно",
+                    egui::Color32::from_rgb(155, 223, 177),
+                ),
+                Some(_) => (
+                    "● Zapret остановлен",
+                    egui::Color32::from_rgb(229, 188, 120),
+                ),
+                None => ("● Состояние уточняется", egui::Color32::GRAY),
+            };
+            ui.colored_label(color, text);
+            if let Some(s) = &self.snapshot {
+                if !s.strategy.is_empty() {
+                    ui.weak(&s.strategy);
+                }
+            }
+            let enabled = self.rx.is_none() && !self.tests.busy() && !self.tests.needs_recovery();
+            let service = self.snapshot.as_ref().is_some_and(|s| s.service_exists);
+            let running = self.snapshot.as_ref().is_some_and(|s| s.service_running);
+            if ui
+                .add_enabled(
+                    enabled && service,
+                    egui::Button::new(if running {
+                        "Остановить службу"
+                    } else {
+                        "Запустить службу"
+                    }),
+                )
+                .clicked()
+            {
+                self.launch(if running { "stop" } else { "start" }.into());
+            }
+            if ui
+                .add_enabled(
+                    self.snapshot_rx.is_none(),
+                    egui::Button::new("Обновить состояние"),
+                )
+                .clicked()
+            {
+                self.refresh_snapshot();
+            }
+        });
+        if !self.snapshot_error.is_empty() {
+            ui.colored_label(egui::Color32::LIGHT_RED, &self.snapshot_error);
+        }
+    }
+    fn management_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.);
+        ui.label(
+            egui::RichText::new("УПРАВЛЕНИЕ СЛУЖБОЙ")
+                .small()
+                .color(egui::Color32::from_rgb(119, 184, 250)),
+        );
+        ui.heading(self.strategy.trim_end_matches(".bat"));
+        ui.weak("Выберите стратегию слева и примените её к службе Zapret.");
+        ui.add_space(12.);
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::same(16.))
+            .rounding(10.)
+            .fill(egui::Color32::from_rgb(32, 40, 51))
+            .show(ui, |ui| {
+                ui.set_min_width((ui.available_width() - 8.).max(0.));
+                ui.label("Выбранная стратегия");
+                ui.strong(&self.strategy);
+                let installed = self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|s| format!("{}.bat", s.strategy) == self.strategy);
+                if installed {
+                    ui.colored_label(egui::Color32::from_rgb(155, 223, 177), "Установлена");
+                }
+                ui.weak("После применения служба запускается автоматически вместе с Windows.");
+            });
+        ui.add_space(12.);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("Применить стратегию…")
+                            .color(egui::Color32::from_rgb(18, 34, 54)),
+                    )
+                    .fill(egui::Color32::from_rgb(119, 184, 250)),
+                )
+                .clicked()
+            {
+                self.confirm = Some("install".into());
+            }
+            if ui.button("Подробное состояние").clicked() {
+                self.launch("status".into());
+            }
+        });
+        ui.add_space(12.);
+        ui.separator();
+        ui.label("Папка Zapret");
+        ui.weak(
+            self.config
+                .root
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+        );
+        if ui.button("Выбрать папку…").clicked() {
+            self.pick_folder();
+        }
+        ui.add_space(10.);
+        if ui
+            .add(egui::Button::new(
+                egui::RichText::new("Удалить службу…")
+                    .color(egui::Color32::from_rgb(216, 166, 166)),
+            ))
+            .clicked()
+        {
+            self.confirm = Some("remove".into());
+        }
+        ui.weak("Установка включает TCP timestamps. Удаление службы сохраняет файлы и списки.");
+    }
+    fn pick_folder(&mut self) {
+        if let Some(p) = rfd::FileDialog::new().pick_folder() {
+            if !p.join("service.bat").is_file() || !p.join("bin/winws.exe").is_file() {
+                self.log = "В папке не найдены service.bat и bin/winws.exe".into();
+                return;
+            }
+            if !self.save_editor() {
+                return;
+            }
+            self.config.root = Some(p);
+            self.selected = None;
+            self.load();
+            self.log = match fs::write(
+                &self.config_path,
+                serde_json::to_vec_pretty(&self.config).unwrap(),
+            ) {
+                Ok(_) => "Папка сохранена".into(),
+                Err(e) => e.to_string(),
+            };
         }
     }
     fn browser_ui(&mut self, ui: &mut egui::Ui) {
@@ -786,91 +1072,108 @@ impl eframe::App for App {
                     }
                 }
                 self.rx = None;
+                self.snapshot_time = None;
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("Zapret GUI");
-                if ui
-                    .add_enabled(
-                        self.rx.is_none() && !self.tests.busy() && !self.tests.needs_recovery(),
-                        egui::Button::new("Выбрать папку"),
-                    )
-                    .clicked()
-                {
-                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                        if p.join("service.bat").is_file() && p.join("bin/winws.exe").is_file() {
-                            if !self.save_editor() {
-                                return;
-                            }
-                            self.config.root = Some(p);
-                            self.selected = None;
-                            self.load();
-                            match fs::write(
-                                &self.config_path,
-                                serde_json::to_vec_pretty(&self.config).unwrap(),
-                            ) {
-                                Ok(_) => self.log = "Папка сохранена".into(),
-                                Err(e) => self.log = e.to_string(),
-                            }
-                        } else {
-                            self.log = "В папке не найдены service.bat и bin/winws.exe".into()
-                        }
+        if let Some(rx) = &self.snapshot_rx {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(snapshot) => {
+                        self.snapshot = Some(snapshot);
+                        self.snapshot_error.clear()
+                    }
+                    Err(e) => self.snapshot_error = e,
+                };
+                self.snapshot_rx = None;
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if self
+            .snapshot_time
+            .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(10))
+        {
+            self.refresh_snapshot();
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs(10));
+        egui::TopBottomPanel::top("top")
+            .frame(
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(30, 36, 45))
+                    .inner_margin(egui::Margin::symmetric(20., 12.)),
+            )
+            .show(ctx, |ui| {
+                self.status_ui(ui);
+            });
+        egui::TopBottomPanel::bottom("log").show(ctx, |ui| {
+            let error = self.log.to_lowercase().contains("ошиб") || self.log.contains("Exception");
+            let title = if error {
+                "Журнал событий · требуется внимание"
+            } else {
+                "Журнал событий"
+            };
+            egui::CollapsingHeader::new(title)
+                .id_salt("journal_disclosure")
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(160.)
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.log)
+                                    .interactive(false)
+                                    .font(egui::TextStyle::Monospace)
+                                    .desired_width(f32::INFINITY),
+                            );
+                        });
+                });
+            if error {
+                ui.colored_label(
+                    egui::Color32::LIGHT_RED,
+                    self.log.lines().next().unwrap_or("Ошибка"),
+                );
+            }
+        });
+        egui::SidePanel::left("nav")
+            .exact_width(170.)
+            .frame(
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(25, 30, 38))
+                    .inner_margin(12.),
+            )
+            .show(ctx, |ui| {
+                ui.add_space(10.);
+                for (id, name) in [
+                    (0, "Управление"),
+                    (2, "Списки"),
+                    (3, "Тесты"),
+                    (4, "Диагностика"),
+                    (1, "Настройки"),
+                ] {
+                    let selected = if id == 1 {
+                        [1, 5, 6, 7].contains(&self.tab)
+                    } else {
+                        self.tab == id
+                    };
+                    if ui
+                        .add_sized(
+                            [ui.available_width(), 40.],
+                            egui::Button::new(name).selected(selected),
+                        )
+                        .clicked()
+                    {
+                        self.tab = id;
                     }
                 }
-            });
-            ui.label(
-                self.config
-                    .root
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "Папка не выбрана".into()),
-            );
-        });
-        egui::TopBottomPanel::bottom("log")
-            .resizable(true)
-            .default_height(160.)
-            .show(ctx, |ui| {
-                ui.label("Журнал");
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.log)
-                            .font(egui::TextStyle::Monospace)
-                            .desired_width(f32::INFINITY),
-                    );
-                });
-            });
-        egui::SidePanel::left("nav")
-            .default_width(170.)
-            .show(ctx, |ui| {
-                for (i, n) in [
-                    "Управление",
-                    "Настройки",
-                    "Списки",
-                    "Тесты",
-                    "Диагностика",
-                    "Fake-файлы",
-                    "Обновления",
-                    "Браузеры",
-                ]
-                .iter()
-                .enumerate()
-                {
-                    ui.selectable_value(&mut self.tab, i, *n);
-                }
-                ui.separator();
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.set_min_width(140.);
-                        ui.label(egui::RichText::new("Совместимость").small().weak());
-                        ui.label("Flowseal 1.10.4");
-                    });
+                    ui.weak("Zapret GUI · 0.1");
+                    ui.label("Flowseal 1.10.4");
+                    ui.weak("Совместимость");
                 });
             });
         if self.tab == 0 || self.tab == 2 {
             egui::SidePanel::left("files")
-                .default_width(275.)
+                .default_width(238.)
                 .width_range(200. ..=440.)
                 .show(ctx, |ui| {
                     ui.heading(if self.tab == 0 {
@@ -937,35 +1240,44 @@ impl eframe::App for App {
                     });
                 });
         }
-        egui::CentralPanel::default().show(ctx,|ui|{ui.add_enabled_ui(self.rx.is_none()&&self.config.root.is_some()&&(self.tab==3||(!self.tests.busy()&&!self.tests.needs_recovery())),|ui|{match self.tab{
- 0=>{ui.heading("Служба Zapret");ui.label(format!("Выбрана стратегия: {}",self.strategy.trim_end_matches(".bat")));ui.add_space(12.);ui.horizontal(|ui|{for(action,label)in[("status","Обновить состояние"),("start","Запустить"),("stop","Остановить")]{if ui.button(label).clicked(){self.launch(action.into())}}});if ui.button("Установить / применить стратегию").clicked(){self.confirm=Some("install".into())}if ui.button("Удалить службу Zapret").clicked(){self.confirm=Some("remove".into())}ui.label("Установка задаёт автозапуск службы и включает TCP timestamps. Удаление касается только службы zapret.");},
- 1=>{ui.heading("Game Filter");ui.horizontal_wrapped(|ui|{for(value,label)in[("disabled","Отключён"),("all","TCP и UDP"),("tcp","TCP"),("udp","UDP")]{ui.selectable_value(&mut self.mode,value.into(),label);}});ui.label("TCP: порты и диапазоны через запятую");ui.text_edit_singleline(&mut self.tcp);ui.label("UDP");ui.text_edit_singleline(&mut self.udp);if ui.button("Сохранить настройки").clicked(){if backend::valid_ports(&self.tcp)&&backend::valid_ports(&self.udp){let p=self.config.root.as_ref().unwrap().join("utils/game_filter.enabled");self.log=match fs::write(p,format!("mode={}\ntcp={}\nudp={}\n",self.mode,self.tcp,self.udp)){Ok(_)=>"Сохранено. Для службы повторно примените выбранную стратегию на вкладке «Управление».".into(),Err(e)=>e.to_string()};}else{self.log="Проверьте порты: допустимы значения 1–65535 и возрастающие диапазоны.".into()}}self.ipset_ui(ui);},
- 2=>{self.editor_ui(ui,ctx);},
- 3=>{self.tests_ui(ui);},
- 4=>{
- ui.heading("Диагностика");
- ui.label("Проверка не меняет настройки Windows и файлы Zapret. Предупреждения указывают на возможную причину, а не подтверждают неисправность.");
- ui.horizontal(|ui| {
- if ui.button("Запустить проверку").clicked() { self.launch("diagnostics".into()); }
- if ui.add_enabled(!self.report.is_empty(),egui::Button::new("Копировать отчёт")).clicked() {
- ui.ctx().copy_text(self.report.iter().map(|c|format!("[{}] {}: {}",c.level,c.title,c.detail)).collect::<Vec<_>>().join("\n"));
- }
- });
- ui.separator();
- if self.report.is_empty() { ui.weak("Проверка ещё не запускалась."); }
- egui::ScrollArea::vertical().show(ui,|ui| {
- for check in &self.report {
- let (label,color)=match check.level.as_str(){"ok"=>("В порядке",egui::Color32::from_rgb(115,200,150)),"warn"=>("Внимание",egui::Color32::from_rgb(235,190,100)),"unknown"=>("Не проверено",egui::Color32::from_rgb(230,140,140)),_=>("Информация",egui::Color32::from_rgb(140,185,230))};
- egui::Frame::group(ui.style()).show(ui,|ui|{ui.set_min_width(ui.available_width());ui.horizontal_wrapped(|ui|{ui.strong(&check.title);ui.colored_label(color,label);});ui.label(&check.detail);
-if check.title=="Базовая фильтрация Windows" && check.level=="warn" && ui.button("Запустить BFE…").clicked(){self.confirm=Some("fix_bfe".into());}
-if check.title=="TCP timestamps" && ui.button("Включить TCP timestamps…").clicked(){self.confirm=Some("fix_timestamps".into());}});
- }
- });
- }
- 5=>{self.fakes_ui(ui);},
- 6=>{self.updates_ui(ui);},
- _=>{self.browser_ui(ui);}
- }});});
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().inner_margin(22.))
+            .show(ctx, |ui| {
+                if self.config.root.is_none() {
+                    ui.heading("Выберите папку Zapret");
+                    if ui.button("Выбрать папку…").clicked() {
+                        self.pick_folder();
+                    }
+                    return;
+                }
+                if [1, 5, 6, 7].contains(&self.tab) {
+                    ui.horizontal_wrapped(|ui| {
+                        for (id, name) in [
+                            (1, "Фильтры"),
+                            (5, "Fake-файлы"),
+                            (6, "Обновления"),
+                            (7, "Браузеры"),
+                        ] {
+                            ui.selectable_value(&mut self.tab, id, name);
+                        }
+                    });
+                    ui.separator();
+                }
+                ui.add_enabled_ui(
+                    self.rx.is_none()
+                        && self.config.root.is_some()
+                        && (self.tab == 3 || (!self.tests.busy() && !self.tests.needs_recovery())),
+                    |ui| {
+                        if [0, 1, 6, 7].contains(&self.tab) {
+                            egui::ScrollArea::vertical()
+                                .id_salt(("workspace", self.tab))
+                                .show(ui, |ui| self.workspace(ui, ctx));
+                        } else {
+                            self.workspace(ui, ctx);
+                        }
+                    },
+                );
+            });
         if let Some((target, source)) = self.fake_confirm.clone() {
             egui::Window::new("Замена fake-файла").collapsible(false).resizable(false).show(ctx,|ui|{
                 ui.label(if source.is_empty(){format!("Восстановить предыдущий {target} из резервной копии?")}else{format!("Заменить {target} содержимым {source}? Предыдущий файл будет сохранён в .backup.")});
@@ -1005,7 +1317,9 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Zapret GUI",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([1000., 720.]),
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([1280., 720.])
+                .with_min_inner_size([1000., 620.]),
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
