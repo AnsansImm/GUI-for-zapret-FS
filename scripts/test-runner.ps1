@@ -14,7 +14,10 @@ function Stop-TestProcess {
  # the PID, locate only the exact executable/arguments created by this test.
  if($script:journal.test_args){
   $matches=@(Get-CimInstance Win32_Process -Filter "Name='winws.exe'" -OperationTimeoutSec 8 | Where-Object {
-   $_.ExecutablePath -eq $plan.exe -and $_.CommandLine -and $_.CommandLine.EndsWith($script:journal.test_args,[StringComparison]::Ordinal)
+   $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath).Equals([IO.Path]::GetFullPath($plan.exe),[StringComparison]::OrdinalIgnoreCase) -and (
+    ($script:journal.test_pid -and $_.ProcessId -eq $script:journal.test_pid -and $script:journal.test_created -and $_.CreationDate.ToUniversalTime().ToString('o') -eq $script:journal.test_created) -or
+    ($_.CommandLine -and $_.CommandLine.EndsWith($script:journal.test_args,[StringComparison]::Ordinal))
+   )
   })
   foreach($p in $matches){
    if($script:journal.test_pid -and $script:journal.test_created -and $p.ProcessId -eq $script:journal.test_pid -and $p.CreationDate.ToUniversalTime().ToString('o') -ne $script:journal.test_created){continue}
@@ -143,6 +146,7 @@ try {
   Write-Json 'report.json' $report
  }
 }finally{$lock.Dispose()}
+
 
 
 
