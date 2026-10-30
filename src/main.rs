@@ -238,7 +238,7 @@ impl App {
     }
     fn tests_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Тестирование стратегий");
-        ui.label("HTTP / TLS 1.2 / TLS 1.3 / ping — цели из utils/targets.txt. IPSet не меняется. Служба будет временно остановлена и восстановлена после теста. Отдельный winws из выбранной папки будет сохранён, остановлен и восстановлен.");
+        ui.label("HTTP/TLS/ping проверяет доступность сайтов. DPI TCP 16–20 проверяет возможное зависание передачи данных. Служба и отдельный winws из выбранной папки восстанавливаются после теста.");
         let busy = self.tests.busy();
         if self.tests.needs_recovery() && !busy {
             ui.colored_label(
@@ -282,19 +282,21 @@ impl App {
             });
             let ui = &mut columns[1];
             ui.heading("Проверка");
+            ui.add_enabled_ui(!busy,|ui|{ui.horizontal_wrapped(|ui|{ui.selectable_value(&mut self.tests.dpi,false,"HTTP / TLS / ping");ui.selectable_value(&mut self.tests.dpi,true,"DPI TCP 16–20");});if self.tests.dpi {ui.label("Свой хост (пусто — набор dpi-checkers)");ui.text_edit_singleline(&mut self.tests.dpi_host);ui.horizontal(|ui|{ui.label("Размер данных, байт");ui.add(egui::DragValue::new(&mut self.tests.range_bytes).range(16384..=1048576));});ui.weak("IPSet временно переключается на любые IP и восстанавливается после теста. Возможна блокировка — это признак, а не доказательство.");}});
             ui.add_enabled_ui(!busy, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Таймаут HTTP, сек.");
                     ui.add(egui::DragValue::new(&mut self.tests.timeout).range(1..=20));
                 });
             });
-            match testing::targets(&root) {
+            if !self.tests.dpi { match testing::targets(&root) {
                 Ok(t) => {
                     ui.label(format!("Целей: {}", t.len()));
                 }
                 Err(e) => {
                     ui.label(e);
                 }
+            }
             }
             if ui
                 .add_enabled(
@@ -311,7 +313,7 @@ impl App {
             {
                 self.tests.cancel();
             }
-            ui.weak("DPI-проверки пока доступны через оригинальный скрипт.");
+            ui.weak("DPI: подробности объёма передачи и времени — при наведении на цель результата.");
             ui.label(format!(
                 "Отчёт: {}",
                 self.tests.dir.join("report.json").display()
@@ -336,7 +338,7 @@ impl App {
                     egui::Color32::from_rgb(245, 120, 120),
                 ),
                 (
-                    "UNSUP — не поддерживается",
+                    "UNSUP — не поддерживается; LIKELY_BLOCKED — возможная блокировка",
                     egui::Color32::from_rgb(235, 190, 100),
                 ),
                 ("— — не проверялось", egui::Color32::GRAY),
@@ -369,6 +371,7 @@ impl App {
                         .filter(|v| matches!(**v, "ERROR" | "SSL/DNS" | "START ERROR"))
                         .count();
                     let unsupported = values.iter().filter(|v| **v == "UNSUP").count();
+                let blocked=values.iter().filter(|v|**v=="LIKELY_BLOCKED").count();
                     egui::Frame::group(ui.style()).show(ui, |ui| {
                         egui::CollapsingHeader::new(egui::RichText::new(name).strong())
                             .id_salt(("strategy_results", name))
@@ -382,7 +385,7 @@ impl App {
                                     );
                                     ui.colored_label(
                                         result_color("UNSUP"),
-                                        format!("Не поддерживается: {unsupported}"),
+                                        format!("Не поддерживается: {unsupported}; возможная блокировка: {blocked}"),
                                     );
                                     if ui
                                         .add_enabled(
@@ -406,7 +409,7 @@ impl App {
                                         }
                                         ui.end_row();
                                         for row in &rows {
-                                            ui.label(&row.target);
+                                            ui.label(&row.target).on_hover_text(&row.detail);
                                             for value in
                                                 [&row.http, &row.tls12, &row.tls13, &row.ping]
                                             {
@@ -426,7 +429,7 @@ impl App {
         }
         if self.tests.confirm {
             egui::Window::new("Запуск тестирования").collapsible(false).show(ui.ctx(),|ui|{
-                ui.label("Тест временно остановит службу Zapret и отдельный winws из выбранной папки. Подключения могут прерваться. После завершения или отмены исходное состояние службы будет восстановлено. Права администратора запросит Windows.");
+                ui.label("В режиме DPI IPSet временно переключается на любые IP и затем восстанавливается. Тест временно остановит службу Zapret и отдельный winws из выбранной папки. Подключения могут прерваться. После завершения или отмены исходное состояние службы будет восстановлено. Права администратора запросит Windows.");
                 ui.horizontal(|ui|{
                     if ui.button("Начать тест").clicked(){self.tests.confirm=false;if self.save_editor(){if let Err(e)=self.tests.start(&root){self.tests.error=e;}}}
                     if ui.button("Отмена").clicked(){self.tests.confirm=false;}
@@ -824,7 +827,7 @@ fn result_color(value: &str) -> egui::Color32 {
     match value {
         "OK" => egui::Color32::from_rgb(110, 210, 150),
         "ERROR" | "SSL/DNS" | "START ERROR" => egui::Color32::from_rgb(245, 120, 120),
-        "UNSUP" | "Timeout" => egui::Color32::from_rgb(235, 190, 100),
+        "UNSUP" | "Timeout" | "LIKELY_BLOCKED" => egui::Color32::from_rgb(235, 190, 100),
         "—" => egui::Color32::GRAY,
         _ if value.ends_with(" ms") => egui::Color32::from_rgb(130, 195, 235),
         _ => egui::Color32::LIGHT_GRAY,

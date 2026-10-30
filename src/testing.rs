@@ -20,6 +20,12 @@ struct Plan {
     strategies: Vec<Strategy>,
     targets: Vec<Target>,
     timeout: u32,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    range_bytes: u32,
+    #[serde(default)]
+    dpi_host: String,
 }
 #[derive(Default, Clone, Deserialize)]
 pub struct Row {
@@ -29,6 +35,8 @@ pub struct Row {
     pub tls12: String,
     pub tls13: String,
     pub ping: String,
+    #[serde(default)]
+    pub detail: String,
 }
 #[derive(Default, Deserialize)]
 pub struct Report {
@@ -43,6 +51,9 @@ pub struct Tests {
     pub selected: std::collections::BTreeSet<String>,
     pub report: Report,
     pub timeout: u32,
+    pub dpi: bool,
+    pub range_bytes: u32,
+    pub dpi_host: String,
     pub dir: PathBuf,
     pub rx: Option<mpsc::Receiver<Result<(), String>>>,
     pub confirm: bool,
@@ -55,6 +66,9 @@ impl Tests {
             selected: Default::default(),
             report: Default::default(),
             timeout: 4,
+            dpi: false,
+            range_bytes: 32768,
+            dpi_host: String::new(),
             dir,
             rx: None,
             confirm: false,
@@ -120,12 +134,22 @@ impl Tests {
         if strategies.is_empty() {
             return Err("Выберите стратегии".into());
         }
-        let targets = targets(root)?;
+        let targets = if self.dpi {
+            vec![Target {
+                name: "DPI suite".into(),
+                url: "https://example.org".into(),
+            }]
+        } else {
+            targets(root)?
+        };
         let plan = Plan {
             exe: root.join("bin/winws.exe").to_string_lossy().into_owned(),
             strategies,
             targets,
             timeout: self.timeout.clamp(1, 20),
+            mode: if self.dpi { "dpi" } else { "standard" }.into(),
+            range_bytes: self.range_bytes.clamp(16384, 1048576),
+            dpi_host: self.dpi_host.trim().into(),
         };
         if self.dir.exists() {
             let archive = self.dir.with_file_name(format!(
@@ -283,6 +307,9 @@ mod plan_tests {
                 url: "https://example.org".into(),
             }],
             timeout: 4,
+            mode: String::new(),
+            range_bytes: 32768,
+            dpi_host: String::new(),
         };
         fs::write(dir.join("plan.json"), serde_json::to_vec(&plan).unwrap()).unwrap();
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/test-runner.ps1");
@@ -376,5 +403,52 @@ if($report.rows.Count -ne 3 -or $report.completed -ne 3 -or $strategyErrors -ne 
             .output()
             .unwrap();
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+}
+
+#[cfg(test)]
+mod dpi_tests {
+    #[test]
+    fn dpi_status_and_ipset_restore() {
+        let dir = std::env::temp_dir().join(format!(
+            "zapret-dpi-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let runner =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/test-runner.ps1");
+        let script = format!(
+            r#"
+$ErrorActionPreference='Stop';$t=$null;$e=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{}',[ref]$t,[ref]$e)
+foreach($name in @('Get-DpiStatus','Restore-State')){{$f=$ast.Find({{param($n)$n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true);Invoke-Expression $f.Extent.Text}}
+if((Get-DpiStatus '000 32768 0 5.000' 28 5) -ne 'LIKELY_BLOCKED'){{throw 'freeze classification'}}
+if((Get-DpiStatus '200 32768 100 0.200' 0 5) -ne 'OK'){{throw 'success classification'}}
+if((Get-DpiStatus 'unsupported' 35 5) -ne 'UNSUP'){{throw 'unsupported classification'}}
+if((Get-DpiStatus '000 0 0 5.000' 28 5) -ne 'ERROR'){{throw 'connection timeout classification'}}
+function Stop-TestProcess{{}}
+function Write-Json($name,$value){{}}
+$path=Join-Path '{}' 'ipset.txt';[IO.File]::WriteAllBytes($path,(New-Object byte[] 0))
+$script:journal=@{{ipset_path=$path;ipset_data=[Convert]::ToBase64String([byte[]](1,2,3,255));service_running=$false;standalone=@();restored=$false}}
+Restore-State
+if([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) -ne $script:journal.ipset_data -or -not $script:journal.restored){{throw 'ipset restore'}}
+"#,
+            runner.display(),
+            dir.display()
+        );
+        let out = super::super::backend::command("powershell.exe")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::remove_file(dir.join("ipset.txt")).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 }

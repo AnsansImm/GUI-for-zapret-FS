@@ -8,7 +8,14 @@ function Write-Json($name,$value){
  [IO.File]::WriteAllText($tmp,(ConvertTo-Json -InputObject $value -Depth 12),$utf8)
  if(Test-Path -LiteralPath $path){[IO.File]::Replace($tmp,$path,($path+'.previous'))}else{[IO.File]::Move($tmp,$path)}
 }
-function Cancelled {Test-Path -LiteralPath (Join-Path $JobDir 'cancel')}
+function Get-DpiStatus($text,$code,$timeoutSeconds){
+ $status=if($code -eq 0){'OK'}elseif($code -eq 35 -or $text -match 'not supported|unsupported|schannel'){'UNSUP'}else{'ERROR'}
+ if($text.Trim() -match '^(\d{3})\s+(\d+)\s+(\d+)\s+([\d.]+)$'){
+  $elapsed=[double]::Parse($Matches[4],[Globalization.CultureInfo]::InvariantCulture)
+  if([long]$Matches[2] -gt 0 -and [long]$Matches[3] -eq 0 -and $elapsed -ge $timeoutSeconds -and $code -ne 0){$status='LIKELY_BLOCKED'}
+ }
+ return $status
+}function Cancelled {Test-Path -LiteralPath (Join-Path $JobDir 'cancel')}
 function Stop-TestProcess {
  # The command is journalled before launch. If the helper crashes before recording
  # the PID, locate only the exact executable/arguments created by this test.
@@ -32,6 +39,7 @@ function Stop-TestProcess {
  }
 }function Restore-State {
  Stop-TestProcess
+ if($script:journal.ipset_path){[IO.File]::WriteAllBytes($script:journal.ipset_path,[Convert]::FromBase64String($script:journal.ipset_data))}
  if($script:journal.service_running){
   $s=Get-Service -Name zapret -ErrorAction Stop
   if($s.Status -ne 'Running'){Start-Service -Name zapret -ErrorAction Stop;$s=Get-Service zapret;$s.WaitForStatus('Running',[TimeSpan]::FromSeconds(20))}
@@ -72,6 +80,21 @@ try {
   if(-not(Test-Path -LiteralPath $plan.exe)){throw 'winws.exe not found'}
   Get-Command curl.exe -ErrorAction Stop|Out-Null
   # Standalone winws may belong to another bypass. Do not stop or recreate it.
+  if($plan.mode -eq 'dpi'){
+   if($plan.dpi_host){
+    $hostValue=$plan.dpi_host.Trim()
+    if($hostValue -match '[/\s:@]' -or [Uri]::CheckHostName($hostValue) -eq 'Unknown'){throw 'Введите имя хоста без https://, пути и порта'}
+    $plan.targets=@(@{name=$hostValue;url=('https://'+$hostValue)})
+   }else{
+    $suite=@(Invoke-RestMethod -Uri 'https://hyperion-cs.github.io/dpi-checkers/ru/tcp-16-20/suite.v2.json' -TimeoutSec 15)
+    $plan.targets=@($suite|ForEach-Object{if($_.host -and [Uri]::CheckHostName($_.host) -ne 'Unknown'){@{name=($_.provider+' / '+$_.id);url=('https://'+$_.host)}}})
+    if($plan.targets.Count -eq 0){throw 'Список DPI-проверок пуст'}
+   }
+   $report.total=@($plan.strategies).Count*@($plan.targets).Count
+   $payload=New-Object byte[] ([int]$plan.range_bytes)
+   $rng=[Security.Cryptography.RandomNumberGenerator]::Create();$rng.GetBytes($payload);$rng.Dispose()
+   $payloadFile=Join-Path $JobDir 'dpi-payload.bin';[IO.File]::WriteAllBytes($payloadFile,$payload)
+  }
   $s=Get-Service -Name zapret -ErrorAction SilentlyContinue
   if($s -and $s.Status -notin @('Running','Stopped')){throw 'Zapret service is changing state; retry later'}
   $servicePid=0
@@ -91,7 +114,12 @@ try {
    $standalone+=@(@{pid=$p.ProcessId;created=$p.CreationDate.ToUniversalTime().ToString('o');args=$argsText})
   }
   $script:journal=@{service_running=[bool]($s -and $s.Status -eq 'Running');test_pid=0;test_created='';test_args='';standalone=@($standalone);restored=$false}
+  if($plan.mode -eq 'dpi'){
+   $script:journal.ipset_path=Join-Path (Split-Path (Split-Path $plan.exe)) 'lists\ipset-all.txt'
+   $script:journal.ipset_data=[Convert]::ToBase64String([IO.File]::ReadAllBytes($script:journal.ipset_path))
+  }
   Write-Json 'journal.json' $script:journal
+  if($plan.mode -eq 'dpi'){[IO.File]::WriteAllBytes($script:journal.ipset_path,(New-Object byte[] 0))}
   foreach($original in $standalone){
    $p=Get-CimInstance Win32_Process -Filter ('ProcessId='+$original.pid) -OperationTimeoutSec 8
    if($p -and $p.CreationDate.ToUniversalTime().ToString('o') -eq $original.created){Stop-Process -Id $original.pid -Force -ErrorAction Stop}
@@ -123,21 +151,29 @@ try {
    foreach($target in $plan.targets){
     if(Cancelled){break}
     if($process.HasExited){throw ('Процесс стратегии завершился во время теста: '+$strategy.name)}
-    $row=@{strategy=$strategy.name;target=$target.name;http='—';tls12='—';tls13='—';ping='—'}
+    $row=@{strategy=$strategy.name;target=$target.name;http='—';tls12='—';tls13='—';ping='—';detail=''}
     $report.message=$strategy.name+' / '+$target.name;Write-Json 'report.json' $report
     if($target.url -notlike 'PING:*'){
      $variants=@(@{key='http';args=@('--http1.1')},@{key='tls12';args=@('--tlsv1.2','--tls-max','1.2')},@{key='tls13';args=@('--tlsv1.3','--tls-max','1.3')})
      foreach($v in $variants){
       if(Cancelled){break}
       $curlArgs=@('-I','-s','-m',[string]$plan.timeout,'--connect-timeout','2','-o','NUL','-w','%{http_code}','--show-error')+$v.args+@($target.url)
+      if($plan.mode -eq 'dpi'){
+       $curlArgs=@('--range',('0-'+([int]$plan.range_bytes-1)),'-m',[string]$plan.timeout,'--connect-timeout','3','-w','%{http_code} %{size_upload} %{size_download} %{time_total}','-o','NUL','-X','POST','--data-binary',('@'+$payloadFile),'-s')+$v.args+@($target.url)
+      }
       # Native stderr is text here; do not turn a failed connection into a PowerShell terminating error.
       $prior=$ErrorActionPreference;$ErrorActionPreference='Continue'
       $text=(& curl.exe @curlArgs 2>&1 | Out-String);$code=$LASTEXITCODE
       $ErrorActionPreference=$prior
+      if($plan.mode -eq 'dpi'){
+       $status=Get-DpiStatus $text $code ([int]$plan.timeout)
+       $row[$v.key]=$status;$row.detail+=($v.key+': '+$text.Trim()+'; ')
+       continue
+      }
       $row[$v.key]=if($code -eq 0){'OK'}elseif($text -match 'certificate|Could not resolve host'){'SSL/DNS'}elseif($code -eq 35 -or $text -match 'not supported|unsupported|schannel'){'UNSUP'}else{'ERROR'}
      }
     }
-    if(-not(Cancelled)){
+    if(-not(Cancelled) -and $plan.mode -ne 'dpi'){
      $hostName=if($target.url -like 'PING:*'){$target.url.Substring(5)}else{([Uri]$target.url).DnsSafeHost}
      $ping=New-Object Net.NetworkInformation.Ping
      try{$reply=$ping.Send($hostName,1000);$row.ping=if($reply.Status -eq 'Success'){[string]$reply.RoundtripTime+' ms'}else{'Timeout'}}catch{$row.ping='Timeout'}finally{$ping.Dispose()}
@@ -169,6 +205,8 @@ try {
   Write-Json 'report.json' $report
  }
 }finally{$lock.Dispose()}
+
+
 
 
 
