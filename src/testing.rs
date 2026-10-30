@@ -344,3 +344,37 @@ mod journal_tests {
         fs::remove_dir(dir).unwrap();
     }
 }
+
+#[cfg(test)]
+mod queue_tests {
+    #[test]
+    fn failed_strategy_does_not_abort_queue() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/test-runner.ps1");
+        let script = format!(
+            r#"
+$ErrorActionPreference='Stop'
+$t=$null;$e=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{}',[ref]$t,[ref]$e)
+$loop=$ast.Find({{param($n)$n -is [System.Management.Automation.Language.ForEachStatementAst] -and $n.Variable.VariablePath.UserPath -eq 'strategy'}},$true)
+function Cancelled{{$false}}
+function Write-Json($name,$value){{}}
+function Stop-TestProcess{{}}
+function Start-Sleep{{}}
+function Start-Process{{throw 'Simulated startup failure'}}
+$JobDir=$env:TEMP
+$plan=@{{strategies=@(@{{name='ALT11'}},@{{name='ALT13'}},@{{name='ALT3'}});targets=@(@{{name='target'}})}}
+$report=@{{rows=@();completed=0;message=''}}
+$script:journal=@{{test_args=''}}
+$strategyErrors=0;$strategyIndex=0
+Invoke-Expression $loop.Extent.Text
+if($report.rows.Count -ne 3 -or $report.completed -ne 3 -or $strategyErrors -ne 3){{throw 'Queue stopped early'}}
+"#,
+            path.display()
+        );
+        let o = super::super::backend::command("powershell.exe")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+}

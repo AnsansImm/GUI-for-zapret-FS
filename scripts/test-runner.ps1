@@ -72,13 +72,21 @@ try {
   $script:journal=@{service_running=[bool]($s -and $s.Status -eq 'Running');test_pid=0;test_created='';test_args='';restored=$false}
   Write-Json 'journal.json' $script:journal
   if($script:journal.service_running){Stop-Service zapret -ErrorAction Stop;$s=Get-Service zapret;$s.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(20))}
+  $strategyErrors=0
+  $strategyIndex=0
   foreach($strategy in $plan.strategies){
+   $strategyIndex++
+   $targetIndex=0
+   $stdout=$null;$stderr=$null
+   try {
    if(Cancelled){break}
    $report.message='Запуск: '+$strategy.name;Write-Json 'report.json' $report
    # Persist executable and command before launching; recover also scans this exact command.
    $script:journal.test_args=$strategy.args
    Write-Json 'journal.json' $script:journal
-   $process=Start-Process -FilePath $plan.exe -ArgumentList $strategy.args -WorkingDirectory (Split-Path $plan.exe) -PassThru -WindowStyle Hidden
+   $stdout=Join-Path $JobDir ('strategy-'+$strategyIndex+'.stdout.log')
+   $stderr=Join-Path $JobDir ('strategy-'+$strategyIndex+'.stderr.log')
+   $process=Start-Process -FilePath $plan.exe -ArgumentList $strategy.args -WorkingDirectory (Split-Path $plan.exe) -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
    $script:journal.test_pid=$process.Id
    $procInfo=Get-CimInstance Win32_Process -Filter ('ProcessId='+$process.Id) -OperationTimeoutSec 8
    if(-not $procInfo){throw ('Стратегия завершилась сразу после запуска: '+$strategy.name)}
@@ -108,12 +116,24 @@ try {
      $ping=New-Object Net.NetworkInformation.Ping
      try{$reply=$ping.Send($hostName,1000);$row.ping=if($reply.Status -eq 'Success'){[string]$reply.RoundtripTime+' ms'}else{'Timeout'}}catch{$row.ping='Timeout'}finally{$ping.Dispose()}
     }
-    $report.rows+=@($row);$report.completed++;Write-Json 'report.json' $report
+    $report.rows+=@($row);$report.completed++;$targetIndex++;Write-Json 'report.json' $report
    }
-   Stop-TestProcess
+   } catch {
+    $strategyErrors++
+    $detail=$_.Exception.Message
+    if($stderr -and (Test-Path -LiteralPath $stderr)){$detail+='; '+[IO.File]::ReadAllText($stderr)}
+    if($stdout -and (Test-Path -LiteralPath $stdout)){$detail+='; '+[IO.File]::ReadAllText($stdout)}
+    $report.rows+=@(@{strategy=$strategy.name;target=$detail;http='START ERROR';tls12='—';tls13='—';ping='—'})
+    $report.completed+=(@($plan.targets).Count-$targetIndex)
+    $report.message='Ошибка стратегии '+$strategy.name+'; переход к следующей'
+    Write-Json 'report.json' $report
+   } finally {
+    Stop-TestProcess
+    Start-Sleep -Milliseconds 500
+   }
   }
-  $report.phase=if(Cancelled){'cancelled'}else{'completed'}
-  $report.message=if(Cancelled){'Проверка отменена'}else{'Проверка завершена'}
+  $report.phase=if(Cancelled){'cancelled'}elseif($strategyErrors -gt 0){'completed_with_errors'}else{'completed'}
+  $report.message=if(Cancelled){'Проверка отменена'}elseif($strategyErrors -gt 0){'Проверка завершена; ошибок стратегий: '+$strategyErrors}else{'Проверка завершена'}
  }catch{
   $report.phase='failed';$report.message=$_.Exception.Message
  }finally{
@@ -123,6 +143,8 @@ try {
   Write-Json 'report.json' $report
  }
 }finally{$lock.Dispose()}
+
+
 
 
 
