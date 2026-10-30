@@ -26,6 +26,12 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        let mut style = (*cc.egui_ctx.style()).clone();
+        style.spacing.item_spacing = egui::vec2(10., 10.);
+        style.spacing.button_padding = egui::vec2(14., 9.);
+        style.visuals.selection.bg_fill = egui::Color32::from_rgb(38, 91, 135);
+        style.visuals.panel_fill = egui::Color32::from_rgb(24, 28, 35);
+        cc.egui_ctx.set_style(style);
         let config_path = std::env::current_exe()
             .unwrap()
             .with_file_name("config.json");
@@ -185,12 +191,94 @@ impl eframe::App for App {
                     ui.selectable_value(&mut self.tab, i, *n);
                 }
                 ui.separator();
-                ui.label("Совместимость: Flowseal 1.10.4");
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(140.);
+                        ui.label(egui::RichText::new("Совместимость").small().weak());
+                        ui.label("Flowseal 1.10.4");
+                    });
+                });
             });
+        if self.tab == 0 || self.tab == 2 {
+            egui::SidePanel::left("files")
+                .default_width(275.)
+                .width_range(200. ..=440.)
+                .show(ctx, |ui| {
+                    ui.heading(if self.tab == 0 {
+                        "Стратегии"
+                    } else {
+                        "Листы"
+                    });
+                    ui.separator();
+                    ui.add_enabled_ui(self.rx.is_none(), |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            if self.tab == 0 {
+                                if let Some(root) = &self.config.root {
+                                    for name in backend::strategies(root) {
+                                        if ui
+                                            .add_sized(
+                                                [ui.available_width(), 30.],
+                                                egui::Button::new(name.trim_end_matches(".bat"))
+                                                    .selected(self.strategy == name),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.strategy = name;
+                                        }
+                                    }
+                                }
+                            } else {
+                                for user in [true, false] {
+                                    ui.add_space(8.);
+                                    ui.label(
+                                        egui::RichText::new(if user {
+                                            "USER-ЛИСТЫ"
+                                        } else {
+                                            "ПРОЧИЕ ЛИСТЫ"
+                                        })
+                                        .small()
+                                        .strong()
+                                        .weak(),
+                                    );
+                                    for path in self.files.clone() {
+                                        let name = path
+                                            .file_name()
+                                            .unwrap()
+                                            .to_string_lossy()
+                                            .into_owned();
+                                        if name.to_lowercase().contains("user") != user {
+                                            continue;
+                                        }
+                                        if ui
+                                            .add_sized(
+                                                [ui.available_width(), 30.],
+                                                egui::Button::new(&name).selected(
+                                                    self.selected.as_ref() == Some(&path),
+                                                ),
+                                            )
+                                            .clicked()
+                                        {
+                                            match fs::read_to_string(&path) {
+                                                Ok(text) => {
+                                                    self.text = text.clone();
+                                                    self.disk = text;
+                                                    self.selected = Some(path);
+                                                }
+                                                Err(e) => self.log = e.to_string(),
+                                            }
+                                        }
+                                    }
+                                    ui.separator();
+                                }
+                            }
+                        });
+                    });
+                });
+        }
         egui::CentralPanel::default().show(ctx,|ui|{ui.add_enabled_ui(self.rx.is_none()&&self.config.root.is_some(),|ui|{match self.tab{
- 0=>{ui.heading("Служба Zapret");ui.label("Стратегия для установки:");if let Some(root)=&self.config.root{egui::ComboBox::from_id_salt("strategy").selected_text(&self.strategy).show_ui(ui,|ui|{for n in backend::strategies(root){ui.selectable_value(&mut self.strategy,n.clone(),n);}});}ui.horizontal(|ui|{for(action,label)in[("status","Обновить состояние"),("start","Запустить"),("stop","Остановить")]{if ui.button(label).clicked(){self.launch(action.into())}}});if ui.button("Установить / применить стратегию").clicked(){self.confirm=Some("install".into())}if ui.button("Удалить службу Zapret").clicked(){self.confirm=Some("remove".into())}ui.label("Установка задаёт автозапуск службы и включает TCP timestamps. Удаление касается только службы zapret.");},
- 1=>{ui.heading("Game Filter");egui::ComboBox::from_id_salt("mode").selected_text(&self.mode).show_ui(ui,|ui|{for m in["disabled","all","tcp","udp"]{ui.selectable_value(&mut self.mode,m.into(),m);}});ui.label("TCP: порты и диапазоны через запятую");ui.text_edit_singleline(&mut self.tcp);ui.label("UDP");ui.text_edit_singleline(&mut self.udp);if ui.button("Сохранить настройки").clicked(){if backend::valid_ports(&self.tcp)&&backend::valid_ports(&self.udp){let p=self.config.root.as_ref().unwrap().join("utils/game_filter.enabled");self.log=match fs::write(p,format!("mode={}\ntcp={}\nudp={}\n",self.mode,self.tcp,self.udp)){Ok(_)=>"Сохранено. Для службы повторно примените выбранную стратегию на вкладке «Управление».".into(),Err(e)=>e.to_string()};}else{self.log="Проверьте порты: допустимы значения 1–65535 и возрастающие диапазоны.".into()}}},
- 2=>{ui.heading("Редактор списков");egui::ComboBox::from_id_salt("lists").selected_text(self.selected.as_ref().map(|p|p.file_name().unwrap().to_string_lossy().into_owned()).unwrap_or_else(||"Выберите список".into())).show_ui(ui,|ui|{for p in self.files.clone(){if ui.selectable_label(self.selected.as_ref()==Some(&p),p.file_name().unwrap().to_string_lossy()).clicked(){match fs::read_to_string(&p){Ok(t)=>{self.text=t.clone();self.disk=t;self.selected=Some(p)},Err(e)=>self.log=e.to_string()}}}});ui.label("Автосохранение. Комментарии начинаются с #. Исходный текст сохраняется без фильтрации.");if self.selected.is_some(){let response=egui::ScrollArea::vertical().show(ui,|ui|ui.add(egui::TextEdit::multiline(&mut self.text).desired_width(f32::INFINITY).desired_rows(22).font(egui::TextStyle::Monospace))).inner;if response.changed(){let p=self.selected.as_ref().unwrap();match fs::read_to_string(p){Ok(current)if current==self.disk=>{match fs::write(p,&self.text){Ok(_)=>{self.disk=self.text.clone();self.log="Сохранено".into()},Err(e)=>self.log=e.to_string()}},_=>{self.log="Файл изменён другой программой. Повторно выберите его перед редактированием. Ваш текст остаётся в редакторе.".into();}}}}},
+ 0=>{ui.heading("Служба Zapret");ui.label(format!("Выбрана стратегия: {}",self.strategy.trim_end_matches(".bat")));ui.add_space(12.);ui.horizontal(|ui|{for(action,label)in[("status","Обновить состояние"),("start","Запустить"),("stop","Остановить")]{if ui.button(label).clicked(){self.launch(action.into())}}});if ui.button("Установить / применить стратегию").clicked(){self.confirm=Some("install".into())}if ui.button("Удалить службу Zapret").clicked(){self.confirm=Some("remove".into())}ui.label("Установка задаёт автозапуск службы и включает TCP timestamps. Удаление касается только службы zapret.");},
+ 1=>{ui.heading("Game Filter");ui.horizontal_wrapped(|ui|{for(value,label)in[("disabled","Отключён"),("all","TCP и UDP"),("tcp","TCP"),("udp","UDP")]{ui.selectable_value(&mut self.mode,value.into(),label);}});ui.label("TCP: порты и диапазоны через запятую");ui.text_edit_singleline(&mut self.tcp);ui.label("UDP");ui.text_edit_singleline(&mut self.udp);if ui.button("Сохранить настройки").clicked(){if backend::valid_ports(&self.tcp)&&backend::valid_ports(&self.udp){let p=self.config.root.as_ref().unwrap().join("utils/game_filter.enabled");self.log=match fs::write(p,format!("mode={}\ntcp={}\nudp={}\n",self.mode,self.tcp,self.udp)){Ok(_)=>"Сохранено. Для службы повторно примените выбранную стратегию на вкладке «Управление».".into(),Err(e)=>e.to_string()};}else{self.log="Проверьте порты: допустимы значения 1–65535 и возрастающие диапазоны.".into()}}},
+ 2=>{ui.heading("Редактор списков");if let Some(path)=&self.selected {ui.label(path.file_name().unwrap().to_string_lossy());}else{ui.label("Выберите лист в колонке слева");}ui.label("Автосохранение. Комментарии начинаются с #. Исходный текст сохраняется без фильтрации.");if self.selected.is_some(){let response=egui::ScrollArea::vertical().show(ui,|ui|ui.add(egui::TextEdit::multiline(&mut self.text).desired_width(f32::INFINITY).desired_rows(22).font(egui::TextStyle::Monospace))).inner;if response.changed(){let p=self.selected.as_ref().unwrap();match fs::read_to_string(p){Ok(current)if current==self.disk=>{match fs::write(p,&self.text){Ok(_)=>{self.disk=self.text.clone();self.log="Сохранено".into()},Err(e)=>self.log=e.to_string()}},_=>{self.log="Файл изменён другой программой. Повторно выберите его перед редактированием. Ваш текст остаётся в редакторе.".into();}}}}},
  _=>{ui.heading("Тестирование стратегий");ui.label("В этой версии тесты запускаются в оригинальном окне PowerShell. Скрипт может останавливать winws и временно менять IPSet. Перед запуском остановите службу Zapret.");if ui.button("Открыть оригинальные тесты…").clicked(){self.confirm=Some("tests".into())}ui.label("Отчёты: utils / test results в папке Zapret. Полностью графическое тестирование — следующий этап.");}
  }});});
         if let Some(action) = self.confirm.clone() {
