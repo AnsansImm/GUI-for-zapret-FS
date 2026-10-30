@@ -179,7 +179,7 @@ impl Tests {
                 dir.display(),
                 if recover { "-Recover" } else { "" }
             );
-            let script=format!("$ErrorActionPreference='Stop';$p=Start-Process powershell.exe -ArgumentList {} -WindowStyle Hidden -Verb RunAs -Wait -PassThru;exit $p.ExitCode",quote(&args));
+            let script=format!("$ErrorActionPreference='Stop';$p=Start-Process powershell.exe -ArgumentList {} -WindowStyle Hidden -Verb RunAs -PassThru;$p.WaitForExit();$p.Refresh();exit $p.ExitCode",quote(&args));
             let result = super::backend::command("powershell.exe")
                 .args(["-NoProfile", "-Command", &script])
                 .output()
