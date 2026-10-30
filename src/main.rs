@@ -4,6 +4,7 @@ mod editor;
 mod fakes;
 mod ipset;
 mod testing;
+mod updates;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, sync::mpsc};
@@ -32,6 +33,7 @@ struct App {
     diagnostic_pending: bool,
     fake_confirm: Option<(String, String)>,
     tests: testing::Tests,
+    updates: updates::Updates,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -81,6 +83,7 @@ impl App {
             diagnostic_pending: false,
             fake_confirm: None,
             tests: testing::Tests::new(),
+            updates: updates::Updates::default(),
         };
         a.load();
         a
@@ -235,6 +238,68 @@ impl App {
                 }
             }
         }
+    }
+    fn updates_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Обновления Flowseal");
+        let current = updates::local(self.config.root.as_ref().unwrap());
+        match &current {
+            Ok(v) => {
+                ui.label(format!("Установленная версия: {v}"));
+            }
+            Err(e) => {
+                ui.colored_label(egui::Color32::LIGHT_RED, e);
+            }
+        }
+        if let Some(latest) = &self.updates.latest {
+            ui.label(format!("Версия в источнике Flowseal: {latest}"));
+            if let Ok(current) = &current {
+                match updates::compare(current, latest) {
+                    Some(std::cmp::Ordering::Less) => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(235, 190, 100),
+                            "Доступна новая версия",
+                        );
+                    }
+                    Some(std::cmp::Ordering::Equal) => {
+                        ui.colored_label(
+                            egui::Color32::LIGHT_GREEN,
+                            "Установленная версия совпадает с источником",
+                        );
+                    }
+                    Some(std::cmp::Ordering::Greater) => {
+                        ui.label("Установленная версия новее указанной в источнике");
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            ui.weak("Доступная версия ещё не определена");
+        }
+        if ui
+            .add_enabled(
+                self.updates.rx.is_none(),
+                egui::Button::new("Проверить обновления"),
+            )
+            .clicked()
+        {
+            self.updates.start();
+        }
+        if self.updates.rx.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Проверка источника Flowseal…");
+            });
+        }
+        if !self.updates.error.is_empty() {
+            ui.colored_label(egui::Color32::LIGHT_RED, &self.updates.error);
+        }
+        if let Some(checked) = &self.updates.checked {
+            ui.weak(checked);
+        }
+        ui.add_space(12.);
+        ui.hyperlink_to("Открыть страницу загрузки Flowseal", updates::DOWNLOAD);
+        ui.label("Загрузка и установка выполняются вручную. Проверка не меняет файлы Zapret и службу. После обновления выберите новую папку и повторно примените стратегию, если путь изменился.");
+        ui.weak("Совместимость функций приложения проверялась на Flowseal 1.10.4; наличие новой версии не означает проверенную совместимость с ней.");
     }
     fn tests_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Тестирование стратегий");
@@ -588,6 +653,10 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.tests.poll();
+        self.updates.poll();
+        if self.updates.rx.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         if self.tests.busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
@@ -699,6 +768,7 @@ impl eframe::App for App {
                     "Тесты",
                     "Диагностика",
                     "Fake-файлы",
+                    "Обновления",
                 ]
                 .iter()
                 .enumerate()
@@ -806,7 +876,8 @@ impl eframe::App for App {
  }
  });
  }
- _=>{self.fakes_ui(ui);}
+ 5=>{self.fakes_ui(ui);},
+ _=>{self.updates_ui(ui);}
  }});});
         if let Some((target, source)) = self.fake_confirm.clone() {
             egui::Window::new("Замена fake-файла").collapsible(false).resizable(false).show(ctx,|ui|{
