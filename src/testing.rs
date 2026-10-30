@@ -424,7 +424,10 @@ mod dpi_tests {
             r#"
 $ErrorActionPreference='Stop';$t=$null;$e=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile('{}',[ref]$t,[ref]$e)
-foreach($name in @('Get-DpiStatus','Restore-State')){{$f=$ast.Find({{param($n)$n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true);Invoke-Expression $f.Extent.Text}}
+foreach($name in @('Get-DpiStatus','Restore-State','Convert-DpiSuite')){{$f=$ast.Find({{param($n)$n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true);Invoke-Expression $f.Extent.Text}}
+$entries=@([pscustomobject]@{{host='one.example';provider='One';id='1'}},[pscustomobject]@{{host='two.example';provider='Two';id='2'}})
+$flat=@(Convert-DpiSuite $entries);$nested=@(Convert-DpiSuite (, $entries))
+if($flat.Count -ne 2 -or $nested.Count -ne 2 -or $nested[1].url -ne 'https://two.example'){{throw 'DPI suite array flattening'}}
 if((Get-DpiStatus '000 32768 0 5.000' 28 5) -ne 'LIKELY_BLOCKED'){{throw 'freeze classification'}}
 if((Get-DpiStatus '200 32768 100 0.200' 0 5) -ne 'OK'){{throw 'success classification'}}
 if((Get-DpiStatus 'unsupported' 35 5) -ne 'UNSUP'){{throw 'unsupported classification'}}

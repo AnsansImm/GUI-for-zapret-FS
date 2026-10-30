@@ -8,7 +8,14 @@ function Write-Json($name,$value){
  [IO.File]::WriteAllText($tmp,(ConvertTo-Json -InputObject $value -Depth 12),$utf8)
  if(Test-Path -LiteralPath $path){[IO.File]::Replace($tmp,$path,($path+'.previous'))}else{[IO.File]::Move($tmp,$path)}
 }
-function Get-DpiStatus($text,$code,$timeoutSeconds){
+function Convert-DpiSuite($suite){
+ foreach($entry in $suite){
+  if($entry -is [array]){Convert-DpiSuite $entry;continue}
+  if($entry.host -and [Uri]::CheckHostName([string]$entry.host) -ne 'Unknown'){
+   @{name=([string]$entry.provider+' / '+[string]$entry.id);url=('https://'+[string]$entry.host)}
+  }
+ }
+}function Get-DpiStatus($text,$code,$timeoutSeconds){
  $status=if($code -eq 0){'OK'}elseif($code -eq 35 -or $text -match 'not supported|unsupported|schannel'){'UNSUP'}else{'ERROR'}
  if($text.Trim() -match '^(\d{3})\s+(\d+)\s+(\d+)\s+([\d.]+)$'){
   $elapsed=[double]::Parse($Matches[4],[Globalization.CultureInfo]::InvariantCulture)
@@ -87,7 +94,7 @@ try {
     $plan.targets=@(@{name=$hostValue;url=('https://'+$hostValue)})
    }else{
     $suite=@(Invoke-RestMethod -Uri 'https://hyperion-cs.github.io/dpi-checkers/ru/tcp-16-20/suite.v2.json' -TimeoutSec 15)
-    $plan.targets=@($suite|ForEach-Object{if($_.host -and [Uri]::CheckHostName($_.host) -ne 'Unknown'){@{name=($_.provider+' / '+$_.id);url=('https://'+$_.host)}}})
+    $plan.targets=@(Convert-DpiSuite $suite)
     if($plan.targets.Count -eq 0){throw 'Список DPI-проверок пуст'}
    }
    $report.total=@($plan.strategies).Count*@($plan.targets).Count
@@ -205,6 +212,7 @@ try {
   Write-Json 'report.json' $report
  }
 }finally{$lock.Dispose()}
+
 
 
 
