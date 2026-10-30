@@ -3,3 +3,6 @@
 /zapret-discord-youtube-*/
 /.idea/
 *.log
+
+/test-run/
+/test-report-*/

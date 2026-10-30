@@ -3,6 +3,7 @@ mod backend;
 mod editor;
 mod fakes;
 mod ipset;
+mod testing;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, sync::mpsc};
@@ -30,6 +31,7 @@ struct App {
     report: Vec<backend::Check>,
     diagnostic_pending: bool,
     fake_confirm: Option<(String, String)>,
+    tests: testing::Tests,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -78,6 +80,7 @@ impl App {
             report: Vec::new(),
             diagnostic_pending: false,
             fake_confirm: None,
+            tests: testing::Tests::new(),
         };
         a.load();
         a
@@ -233,6 +236,147 @@ impl App {
             }
         }
     }
+    fn tests_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Тестирование стратегий");
+        ui.label("HTTP / TLS 1.2 / TLS 1.3 / ping — цели из utils/targets.txt. IPSet не меняется. Служба будет временно остановлена и восстановлена после теста. Отдельно запущенные процессы winws нужно закрыть вручную.");
+        let busy = self.tests.busy();
+        if self.tests.needs_recovery() && !busy {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "Обнаружен незавершённый тест. Сначала восстановите состояние.",
+            );
+            if ui.button("Восстановить исходное состояние").clicked() {
+                self.tests.recover();
+            }
+        }
+        if !self.tests.error.is_empty() {
+            ui.colored_label(egui::Color32::LIGHT_RED, &self.tests.error);
+        }
+        let root = self.config.root.clone().unwrap();
+        ui.columns(2, |columns| {
+            columns[0].heading("Стратегии");
+            columns[0].add_enabled_ui(!busy && !self.tests.needs_recovery(), |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Все").clicked() {
+                        self.tests.selected = backend::strategies(&root).into_iter().collect();
+                    }
+                    if ui.button("Снять выбор").clicked() {
+                        self.tests.selected.clear();
+                    }
+                });
+                egui::ScrollArea::vertical()
+                    .id_salt("test_strategies")
+                    .max_height(230.)
+                    .show(ui, |ui| {
+                        for name in backend::strategies(&root) {
+                            let mut selected = self.tests.selected.contains(&name);
+                            if ui.checkbox(&mut selected, &name).changed() {
+                                if selected {
+                                    self.tests.selected.insert(name);
+                                } else {
+                                    self.tests.selected.remove(&name);
+                                }
+                            }
+                        }
+                    });
+            });
+            let ui = &mut columns[1];
+            ui.heading("Проверка");
+            ui.add_enabled_ui(!busy, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Таймаут HTTP, сек.");
+                    ui.add(egui::DragValue::new(&mut self.tests.timeout).range(1..=20));
+                });
+            });
+            match testing::targets(&root) {
+                Ok(t) => {
+                    ui.label(format!("Целей: {}", t.len()));
+                }
+                Err(e) => {
+                    ui.label(e);
+                }
+            }
+            if ui
+                .add_enabled(
+                    !busy && !self.tests.needs_recovery() && !self.tests.selected.is_empty(),
+                    egui::Button::new("Запустить выбранные стратегии…"),
+                )
+                .clicked()
+            {
+                self.tests.confirm = true;
+            }
+            if ui
+                .add_enabled(busy, egui::Button::new("Отменить и восстановить"))
+                .clicked()
+            {
+                self.tests.cancel();
+            }
+            ui.weak("DPI-проверки пока доступны через оригинальный скрипт.");
+            ui.label(format!(
+                "Отчёт: {}",
+                self.tests.dir.join("report.json").display()
+            ));
+        });
+        let report = &self.tests.report;
+        ui.separator();
+        ui.label(&report.message);
+        if report.total > 0 {
+            ui.add(
+                egui::ProgressBar::new(report.completed as f32 / report.total as f32).text(
+                    format!("{} / {} · {}", report.completed, report.total, report.phase),
+                ),
+            );
+        }
+        let mut apply = None;
+        egui::ScrollArea::both()
+            .id_salt("test_results")
+            .show(ui, |ui| {
+                egui::Grid::new("test_table").striped(true).show(ui, |ui| {
+                    for label in [
+                        "Стратегия",
+                        "Цель",
+                        "HTTP",
+                        "TLS 1.2",
+                        "TLS 1.3",
+                        "Ping",
+                        "",
+                    ] {
+                        ui.strong(label);
+                    }
+                    ui.end_row();
+                    for row in &self.tests.report.rows {
+                        ui.label(&row.strategy);
+                        ui.label(&row.target);
+                        for value in [&row.http, &row.tls12, &row.tls13, &row.ping] {
+                            ui.label(value);
+                        }
+                        if ui
+                            .add_enabled(
+                                !busy && !self.tests.needs_recovery(),
+                                egui::Button::new("Применить…"),
+                            )
+                            .clicked()
+                        {
+                            apply = Some(row.strategy.clone());
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
+        if let Some(name) = apply {
+            self.strategy = name;
+            self.confirm = Some("install".into());
+        }
+        if self.tests.confirm {
+            egui::Window::new("Запуск тестирования").collapsible(false).show(ui.ctx(),|ui|{
+                ui.label("Тест временно остановит службу Zapret. Подключения могут прерваться. После завершения или отмены исходное состояние службы будет восстановлено. Права администратора запросит Windows.");
+                ui.horizontal(|ui|{
+                    if ui.button("Начать тест").clicked(){self.tests.confirm=false;if self.save_editor(){if let Err(e)=self.tests.start(&root){self.tests.error=e;}}}
+                    if ui.button("Отмена").clicked(){self.tests.confirm=false;}
+                });
+            });
+        }
+    }
     fn fakes_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Активные fake-файлы");
         ui.label("Выберите содержимое для Discord UDP или Game Filter UDP. Список соответствует .bin-файлам сборки. Перед заменой сохраняется предыдущий файл; применение требует перезапуска Zapret.");
@@ -329,6 +473,11 @@ impl App {
         ui.weak("Резервная копия: lists/ipset-all.txt.backup. Обновление сохраняет выбранный режим. Настройка относится к IPSet-правилам стратегии; доменные правила работают отдельно.");
     }
     fn launch(&mut self, action: String) {
+        if self.tests.busy() || self.tests.needs_recovery() {
+            self.log =
+                "Сначала завершите тест или восстановите состояние на вкладке «Тесты».".into();
+            return;
+        }
         if let Some(root) = self.config.root.clone() {
             if action == "install" {
                 if let Err(e) = backend::strategy_args(&root, &self.strategy) {
@@ -378,6 +527,15 @@ impl App {
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.tests.poll();
+        if self.tests.busy() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && self.tests.busy() {
+            self.tests.cancel();
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.log="Отмена теста и восстановление состояния. Дождитесь завершения перед закрытием окна.".into();
+        }
         if ctx.input(|i| i.viewport().close_requested()) && !self.save_editor() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
@@ -423,7 +581,10 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 ui.heading("Zapret GUI");
                 if ui
-                    .add_enabled(self.rx.is_none(), egui::Button::new("Выбрать папку"))
+                    .add_enabled(
+                        self.rx.is_none() && !self.tests.busy() && !self.tests.needs_recovery(),
+                        egui::Button::new("Выбрать папку"),
+                    )
                     .clicked()
                 {
                     if let Some(p) = rfd::FileDialog::new().pick_folder() {
@@ -562,11 +723,11 @@ impl eframe::App for App {
                     });
                 });
         }
-        egui::CentralPanel::default().show(ctx,|ui|{ui.add_enabled_ui(self.rx.is_none()&&self.config.root.is_some(),|ui|{match self.tab{
+        egui::CentralPanel::default().show(ctx,|ui|{ui.add_enabled_ui(self.rx.is_none()&&self.config.root.is_some()&&(self.tab==3||(!self.tests.busy()&&!self.tests.needs_recovery())),|ui|{match self.tab{
  0=>{ui.heading("Служба Zapret");ui.label(format!("Выбрана стратегия: {}",self.strategy.trim_end_matches(".bat")));ui.add_space(12.);ui.horizontal(|ui|{for(action,label)in[("status","Обновить состояние"),("start","Запустить"),("stop","Остановить")]{if ui.button(label).clicked(){self.launch(action.into())}}});if ui.button("Установить / применить стратегию").clicked(){self.confirm=Some("install".into())}if ui.button("Удалить службу Zapret").clicked(){self.confirm=Some("remove".into())}ui.label("Установка задаёт автозапуск службы и включает TCP timestamps. Удаление касается только службы zapret.");},
  1=>{ui.heading("Game Filter");ui.horizontal_wrapped(|ui|{for(value,label)in[("disabled","Отключён"),("all","TCP и UDP"),("tcp","TCP"),("udp","UDP")]{ui.selectable_value(&mut self.mode,value.into(),label);}});ui.label("TCP: порты и диапазоны через запятую");ui.text_edit_singleline(&mut self.tcp);ui.label("UDP");ui.text_edit_singleline(&mut self.udp);if ui.button("Сохранить настройки").clicked(){if backend::valid_ports(&self.tcp)&&backend::valid_ports(&self.udp){let p=self.config.root.as_ref().unwrap().join("utils/game_filter.enabled");self.log=match fs::write(p,format!("mode={}\ntcp={}\nudp={}\n",self.mode,self.tcp,self.udp)){Ok(_)=>"Сохранено. Для службы повторно примените выбранную стратегию на вкладке «Управление».".into(),Err(e)=>e.to_string()};}else{self.log="Проверьте порты: допустимы значения 1–65535 и возрастающие диапазоны.".into()}}self.ipset_ui(ui);},
  2=>{self.editor_ui(ui,ctx);},
- 3=>{ui.heading("Тестирование стратегий");ui.label("В этой версии тесты запускаются в оригинальном окне PowerShell. Скрипт может останавливать winws и временно менять IPSet. Перед запуском остановите службу Zapret.");if ui.button("Открыть оригинальные тесты…").clicked(){self.confirm=Some("tests".into())}ui.label("Отчёты: utils / test results в папке Zapret. Полностью графическое тестирование — следующий этап.");}
+ 3=>{self.tests_ui(ui);},
  4=>{
  ui.heading("Диагностика");
  ui.label("Проверка не меняет настройки Windows и файлы Zapret. Предупреждения указывают на возможную причину, а не подтверждают неисправность.");
