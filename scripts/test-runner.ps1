@@ -36,6 +36,15 @@ function Stop-TestProcess {
   $s=Get-Service -Name zapret -ErrorAction Stop
   if($s.Status -ne 'Running'){Start-Service -Name zapret -ErrorAction Stop;$s=Get-Service zapret;$s.WaitForStatus('Running',[TimeSpan]::FromSeconds(20))}
  }
+ foreach($original in @($script:journal.standalone)){
+  if(-not $original){continue}
+  $existing=@(Get-CimInstance Win32_Process -Filter "Name='winws.exe'" -OperationTimeoutSec 8 | Where-Object {$_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath).Equals([IO.Path]::GetFullPath($plan.exe),[StringComparison]::OrdinalIgnoreCase) -and $_.CommandLine.EndsWith($original.args,[StringComparison]::Ordinal)})
+  if($existing.Count -eq 0){
+   $restored=Start-Process -FilePath $plan.exe -ArgumentList $original.args -WorkingDirectory (Split-Path $plan.exe) -PassThru -WindowStyle Hidden
+   Start-Sleep -Milliseconds 700
+   if($restored.HasExited){throw 'Исходный winws завершился при восстановлении'}
+  }
+ }
  $script:journal.restored=$true
  Write-Json 'journal.json' $script:journal
 }
@@ -71,9 +80,23 @@ try {
    $servicePid=$svc.ProcessId
   }
   $others=@(Get-CimInstance Win32_Process -Filter "Name='winws.exe'" -OperationTimeoutSec 8 | Where-Object {$_.ProcessId -ne $servicePid})
-  if($others.Count -gt 0){throw 'Обнаружен отдельный процесс winws. Закройте запущенную вручную стратегию перед тестированием.'}
-  $script:journal=@{service_running=[bool]($s -and $s.Status -eq 'Running');test_pid=0;test_created='';test_args='';restored=$false}
+  $standalone=@()
+  foreach($p in $others){
+   if(-not $p.ExecutablePath -or -not [IO.Path]::GetFullPath($p.ExecutablePath).Equals([IO.Path]::GetFullPath($plan.exe),[StringComparison]::OrdinalIgnoreCase)){throw 'Обнаружен winws из другой папки. Тест не будет останавливать чужой процесс.'}
+   $cmd=$p.CommandLine
+   if($cmd -match '^\s*"[^"]*"\s*(.*)$'){$argsText=$Matches[1]}
+   elseif($cmd -and $cmd.StartsWith($p.ExecutablePath,[StringComparison]::OrdinalIgnoreCase)){$argsText=$cmd.Substring($p.ExecutablePath.Length).Trim()}
+   else{throw 'Не удалось сохранить параметры работающего winws; тест отменён'}
+   if(-not $argsText){throw 'Пустые параметры работающего winws; тест отменён'}
+   $standalone+=@(@{pid=$p.ProcessId;created=$p.CreationDate.ToUniversalTime().ToString('o');args=$argsText})
+  }
+  $script:journal=@{service_running=[bool]($s -and $s.Status -eq 'Running');test_pid=0;test_created='';test_args='';standalone=@($standalone);restored=$false}
   Write-Json 'journal.json' $script:journal
+  foreach($original in $standalone){
+   $p=Get-CimInstance Win32_Process -Filter ('ProcessId='+$original.pid) -OperationTimeoutSec 8
+   if($p -and $p.CreationDate.ToUniversalTime().ToString('o') -eq $original.created){Stop-Process -Id $original.pid -Force -ErrorAction Stop}
+  }
+  Start-Sleep -Milliseconds 500
   if($script:journal.service_running){Stop-Service zapret -ErrorAction Stop;$s=Get-Service zapret;$s.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(20))}
   $strategyErrors=0
   $strategyIndex=0
@@ -146,6 +169,7 @@ try {
   Write-Json 'report.json' $report
  }
 }finally{$lock.Dispose()}
+
 
 
 

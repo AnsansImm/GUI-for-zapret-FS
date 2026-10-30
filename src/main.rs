@@ -238,7 +238,7 @@ impl App {
     }
     fn tests_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Тестирование стратегий");
-        ui.label("HTTP / TLS 1.2 / TLS 1.3 / ping — цели из utils/targets.txt. IPSet не меняется. Служба будет временно остановлена и восстановлена после теста. Отдельно запущенные процессы winws нужно закрыть вручную.");
+        ui.label("HTTP / TLS 1.2 / TLS 1.3 / ping — цели из utils/targets.txt. IPSet не меняется. Служба будет временно остановлена и восстановлена после теста. Отдельный winws из выбранной папки будет сохранён, остановлен и восстановлен.");
         let busy = self.tests.busy();
         if self.tests.needs_recovery() && !busy {
             ui.colored_label(
@@ -369,7 +369,7 @@ impl App {
         }
         if self.tests.confirm {
             egui::Window::new("Запуск тестирования").collapsible(false).show(ui.ctx(),|ui|{
-                ui.label("Тест временно остановит службу Zapret. Подключения могут прерваться. После завершения или отмены исходное состояние службы будет восстановлено. Права администратора запросит Windows.");
+                ui.label("Тест временно остановит службу Zapret и отдельный winws из выбранной папки. Подключения могут прерваться. После завершения или отмены исходное состояние службы будет восстановлено. Права администратора запросит Windows.");
                 ui.horizontal(|ui|{
                     if ui.button("Начать тест").clicked(){self.tests.confirm=false;if self.save_editor(){if let Err(e)=self.tests.start(&root){self.tests.error=e;}}}
                     if ui.button("Отмена").clicked(){self.tests.confirm=false;}
