@@ -6,7 +6,7 @@ function Write-Json($name,$value){
  $path=Join-Path $JobDir $name
  $tmp=$path+'.tmp'
  [IO.File]::WriteAllText($tmp,(ConvertTo-Json -InputObject $value -Depth 12),$utf8)
- if(Test-Path -LiteralPath $path){[IO.File]::Replace($tmp,$path,$null)}else{[IO.File]::Move($tmp,$path)}
+ if(Test-Path -LiteralPath $path){[IO.File]::Replace($tmp,$path,($path+'.previous'))}else{[IO.File]::Move($tmp,$path)}
 }
 function Cancelled {Test-Path -LiteralPath (Join-Path $JobDir 'cancel')}
 function Stop-TestProcess {
@@ -123,5 +123,6 @@ try {
   Write-Json 'report.json' $report
  }
 }finally{$lock.Dispose()}
+
 
 

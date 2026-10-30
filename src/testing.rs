@@ -156,6 +156,13 @@ impl Tests {
     pub fn recover(&mut self) {
         if !self.busy() {
             self.error.clear();
+            if let Err(e) = fs::write(
+                self.dir.join("runner.ps1"),
+                include_bytes!("../scripts/test-runner.ps1"),
+            ) {
+                self.error = format!("Не удалось обновить помощник восстановления: {e}");
+                return;
+            }
             self.spawn(true);
         }
     }
@@ -164,6 +171,7 @@ impl Tests {
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
+            let _ = fs::remove_file(dir.join("fatal.log"));
             let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
             let args = format!(
                 "-NoProfile -ExecutionPolicy Bypass -File \"{}\" -JobDir \"{}\" {}",
@@ -181,8 +189,10 @@ impl Tests {
                         Ok(())
                     } else {
                         Err(format!(
-                            "Помощник тестирования не завершился успешно: {}",
-                            String::from_utf8_lossy(&o.stderr)
+                            "Помощник тестирования завершился с кодом {:?}: {}\n{}",
+                            o.status.code(),
+                            String::from_utf8_lossy(&o.stderr),
+                            fs::read_to_string(dir.join("fatal.log")).unwrap_or_default()
                         ))
                     }
                 });
@@ -292,6 +302,45 @@ mod plan_tests {
         assert!(!dir.join("journal.json").exists());
         assert!(!dir.join("report.json").exists());
         fs::remove_file(dir.join("plan.json")).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod journal_tests {
+    #[test]
+    fn repeated_journal_writes_in_windows_powershell() {
+        use std::{fs, path::Path};
+        let dir = std::env::temp_dir().join(format!(
+            "zapret-journal-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let runner = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/test-runner.ps1");
+        let script = format!(
+            r#"$ErrorActionPreference='Stop';$JobDir='{}';$utf8=New-Object System.Text.UTF8Encoding($false);$t=$null;$e=$null;$ast=[System.Management.Automation.Language.Parser]::ParseFile('{}',[ref]$t,[ref]$e);$f=$ast.Find({{param($n)$n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Write-Json'}},$true);Invoke-Expression $f.Extent.Text;1..5|ForEach-Object{{Write-Json 'journal.json' @{{restored=($_ -eq 5);iteration=$_}}}}"#,
+            dir.display(),
+            runner.display()
+        );
+        let out = super::super::backend::command("powershell.exe")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let data: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("journal.json")).unwrap()).unwrap();
+        assert_eq!(data["restored"], true);
+        assert_eq!(data["iteration"], 5);
+        for e in fs::read_dir(&dir).unwrap() {
+            fs::remove_file(e.unwrap().path()).unwrap();
+        }
         fs::remove_dir(dir).unwrap();
     }
 }
