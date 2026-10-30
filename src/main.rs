@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod backend;
+mod browser_link;
 mod editor;
 mod fakes;
 mod ipset;
+mod list_store;
 mod testing;
 mod updates;
 use eframe::egui;
@@ -35,6 +37,8 @@ struct App {
     fake_confirm: Option<(String, String)>,
     tests: testing::Tests,
     updates: updates::Updates,
+    browser_kind: String,
+    extension_id: String,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -86,6 +90,8 @@ impl App {
             fake_confirm: None,
             tests: testing::Tests::new(),
             updates: updates::Updates::default(),
+            browser_kind: "Chrome / Opera".into(),
+            extension_id: String::new(),
         };
         a.load();
         a
@@ -102,19 +108,33 @@ impl App {
             self.last_edit = None;
             return true;
         }
+        let lists = path.parent().unwrap();
+        let _guard = match list_store::lock(lists) {
+            Ok(g) => g,
+            Err(e) => {
+                self.log = e;
+                return false;
+            }
+        };
+        if let Err(e) = list_store::recover(lists) {
+            self.log = e;
+            return false;
+        }
         match fs::read_to_string(path) {
-            Ok(current) if current == self.disk => match fs::write(path, &content) {
-                Ok(()) => {
-                    self.disk = content;
-                    self.last_edit = None;
-                    self.log = "Изменения сохранены".into();
-                    true
+            Ok(current) if current == self.disk => {
+                match list_store::atomic(path, content.as_bytes()) {
+                    Ok(()) => {
+                        self.disk = content;
+                        self.last_edit = None;
+                        self.log = "Изменения сохранены".into();
+                        true
+                    }
+                    Err(e) => {
+                        self.log = format!("Ошибка сохранения: {e}");
+                        false
+                    }
                 }
-                Err(e) => {
-                    self.log = format!("Ошибка сохранения: {e}");
-                    false
-                }
-            },
+            }
             _ => {
                 self.log = "Файл изменён извне или недоступен. Изменения остаются в редакторе; переход и закрытие отменены. Скопируйте текст перед повторным открытием файла.".into();
                 false
@@ -123,6 +143,17 @@ impl App {
     }
     fn open_list(&mut self, path: PathBuf) {
         if !self.save_editor() {
+            return;
+        }
+        let _guard = match list_store::lock(path.parent().unwrap()) {
+            Ok(g) => g,
+            Err(e) => {
+                self.log = e;
+                return;
+            }
+        };
+        if let Err(e) = list_store::recover(path.parent().unwrap()) {
+            self.log = e;
             return;
         }
         match fs::read_to_string(&path) {
@@ -240,6 +271,41 @@ impl App {
                 }
             }
         }
+    }
+    fn browser_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Браузерное расширение");
+        ui.label("Установите расширение, затем зарегистрируйте помощник для текущего пользователя. Оба exe должны лежать рядом; после переноса зарегистрируйте подключение снова.");
+        ui.horizontal_wrapped(|ui| {
+            for name in ["Chrome / Opera", "Edge", "Firefox"] {
+                ui.selectable_value(&mut self.browser_kind, name.into(), name);
+            }
+        });
+        ui.label("Chromium: откройте страницу расширений, включите режим разработчика, загрузите extensions/chromium. Скопируйте ID установленного расширения ниже.");
+        ui.label("Firefox: about:debugging → Этот Firefox → Загрузить временное дополнение → extensions/firefox/manifest.json. Временное дополнение действует до перезапуска браузера.");
+        if self.browser_kind != "Firefox" {
+            ui.label("ID расширения (32 буквы)");
+            ui.text_edit_singleline(&mut self.extension_id);
+        }
+        if ui.button("Зарегистрировать подключение").clicked() {
+            if self.save_editor() {
+                let saved = fs::write(
+                    &self.config_path,
+                    serde_json::to_vec_pretty(&self.config).unwrap(),
+                );
+                self.log = match saved {
+                    Ok(_) => browser_link::register(
+                        self.config_path.parent().unwrap(),
+                        &self.browser_kind,
+                        self.extension_id.trim(),
+                    )
+                    .unwrap_or_else(|e| e),
+                    Err(e) => e.to_string(),
+                };
+            }
+        }
+        ui.separator();
+        ui.label("В расширении: статус точного домена, «Через Zapret», «Исключить из Zapret», «Открыть Zapret GUI». Выбор обновляет оба user-листа и убирает точную запись из противоположного. Общие списки, wildcard и поддомены не изменяются.");
+        ui.weak("Для Chrome и Opera регистрируйте ID каждого установленного экземпляра: помощник сохраняет список разрешённых ID. Регистрация использует HKCU, без прав администратора.");
     }
     fn updates_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Обновления Flowseal");
@@ -786,6 +852,7 @@ impl eframe::App for App {
                     "Диагностика",
                     "Fake-файлы",
                     "Обновления",
+                    "Браузеры",
                 ]
                 .iter()
                 .enumerate()
@@ -896,7 +963,8 @@ if check.title=="TCP timestamps" && ui.button("Включить TCP timestamps�
  });
  }
  5=>{self.fakes_ui(ui);},
- _=>{self.updates_ui(ui);}
+ 6=>{self.updates_ui(ui);},
+ _=>{self.browser_ui(ui);}
  }});});
         if let Some((target, source)) = self.fake_confirm.clone() {
             egui::Window::new("Замена fake-файла").collapsible(false).resizable(false).show(ctx,|ui|{
