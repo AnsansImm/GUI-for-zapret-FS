@@ -1,9 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod backend;
+mod browser_sites;
 mod editor;
 mod fakes;
 mod ipset;
 mod list_store;
+mod sqlite_history;
 mod testing;
 mod updates;
 use eframe::egui;
@@ -37,6 +39,7 @@ struct App {
     fake_confirm: Option<(String, String)>,
     tests: testing::Tests,
     updates: updates::Updates,
+    sites: browser_sites::Sites,
     snapshot: Option<backend::Snapshot>,
     snapshot_rx: Option<mpsc::Receiver<Result<backend::Snapshot, String>>>,
     snapshot_time: Option<std::time::Instant>,
@@ -48,10 +51,10 @@ impl App {
         let mut style = (*cc.egui_ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(10., 10.);
         style.spacing.button_padding = egui::vec2(14., 9.);
-        style.visuals.panel_fill = egui::Color32::from_rgb(23, 27, 34);
-        style.visuals.window_fill = egui::Color32::from_rgb(30, 36, 45);
-        style.visuals.extreme_bg_color = egui::Color32::from_rgb(20, 26, 34);
-        style.visuals.faint_bg_color = egui::Color32::from_rgb(32, 40, 51);
+        style.visuals.panel_fill = egui::Color32::from_rgb(29, 33, 40);
+        style.visuals.window_fill = egui::Color32::from_rgb(36, 42, 51);
+        style.visuals.extreme_bg_color = egui::Color32::from_rgb(26, 32, 40);
+        style.visuals.faint_bg_color = egui::Color32::from_rgb(38, 46, 57);
         style.visuals.selection.bg_fill = egui::Color32::from_rgb(42, 65, 94);
         style.visuals.selection.stroke.color = egui::Color32::from_rgb(193, 222, 255);
         style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(43, 52, 66);
@@ -113,6 +116,7 @@ impl App {
             fake_confirm: None,
             tests: testing::Tests::new(),
             updates: updates::Updates::default(),
+            sites: browser_sites::Sites::default(),
             snapshot: None,
             snapshot_rx: None,
             snapshot_time: None,
@@ -193,74 +197,77 @@ impl App {
         }
     }
     fn editor_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.heading("Редактор списков");
-        let Some(path) = self.selected.clone() else {
-            ui.label("Выберите лист в колонке слева");
-            return;
-        };
-        let ip = editor::is_ip(&path);
-        ui.label(path.file_name().unwrap().to_string_lossy());
-        ui.label(if ip {
-            "IPSet: адреса IPv4/IPv6 и подсети (/). Пробел — новая строка; # — комментарий."
-        } else {
-            "Домены: a–z, 0–9, -, ., _, *. Пробел — новая строка; # — комментарий."
-        });
-        ui.weak("Автосохранение через 400 мс после ввода");
-        let id = ui.make_persistent_id(("list_editor", &path));
-        let output = egui::ScrollArea::vertical()
-            .id_salt(&path)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                egui::TextEdit::multiline(&mut self.text)
-                    .id(id)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(22)
-                    .font(egui::TextStyle::Monospace)
-                    .show(ui)
-            })
-            .inner;
-        if self.cursor_to_end {
-            let mut state = output.state.clone();
-            state
-                .cursor
-                .set_char_range(Some(egui::text::CCursorRange::one(
-                    egui::text::CCursor::new(self.text.chars().count()),
-                )));
-            state.store(ctx, id);
-            output.response.request_focus();
-            self.cursor_to_end = false;
-            ctx.request_repaint();
-        }
-        if output.response.changed() {
-            // Translate cursor positions through filtering, including Unicode comments.
-            let range = output.cursor_range.map(|r| r.as_ccursor_range());
-            let raw = self.text.clone();
-            self.text = editor::editable(&raw, ip);
-            if let Some(mut range) = range {
-                let map = |index: usize| {
-                    editor::normalize(&raw.chars().take(index).collect::<String>(), ip)
-                        .chars()
-                        .count()
-                        + usize::from(
-                            index > 0
-                                && raw.chars().nth(index - 1).is_some_and(char::is_whitespace)
-                                && !raw
-                                    .lines()
-                                    .last()
-                                    .unwrap_or("")
-                                    .trim_start()
-                                    .starts_with('#'),
-                        )
-                };
-                range.primary.index = map(range.primary.index).min(self.text.chars().count());
-                range.secondary.index = map(range.secondary.index).min(self.text.chars().count());
-                let mut state = output.state;
-                state.cursor.set_char_range(Some(range));
+        page_title(ui, "Редактор списков");
+        settings_card(ui, |ui| {
+            let Some(path) = self.selected.clone() else {
+                ui.label("Выберите лист в колонке слева");
+                return;
+            };
+            let ip = editor::is_ip(&path);
+            ui.label(path.file_name().unwrap().to_string_lossy());
+            ui.label(if ip {
+                "IPSet: адреса IPv4/IPv6 и подсети (/). Пробел — новая строка; # — комментарий."
+            } else {
+                "Домены: a–z, 0–9, -, ., _, *. Пробел — новая строка; # — комментарий."
+            });
+            ui.weak("Автосохранение через 400 мс после ввода");
+            let id = ui.make_persistent_id(("list_editor", &path));
+            let output = egui::ScrollArea::vertical()
+                .id_salt(&path)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    egui::TextEdit::multiline(&mut self.text)
+                        .id(id)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(22)
+                        .font(egui::TextStyle::Monospace)
+                        .show(ui)
+                })
+                .inner;
+            if self.cursor_to_end {
+                let mut state = output.state.clone();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(self.text.chars().count()),
+                    )));
                 state.store(ctx, id);
+                output.response.request_focus();
+                self.cursor_to_end = false;
+                ctx.request_repaint();
             }
-            self.last_edit = Some(std::time::Instant::now());
-            self.log = "Изменения будут сохранены…".into();
-        }
+            if output.response.changed() {
+                // Translate cursor positions through filtering, including Unicode comments.
+                let range = output.cursor_range.map(|r| r.as_ccursor_range());
+                let raw = self.text.clone();
+                self.text = editor::editable(&raw, ip);
+                if let Some(mut range) = range {
+                    let map = |index: usize| {
+                        editor::normalize(&raw.chars().take(index).collect::<String>(), ip)
+                            .chars()
+                            .count()
+                            + usize::from(
+                                index > 0
+                                    && raw.chars().nth(index - 1).is_some_and(char::is_whitespace)
+                                    && !raw
+                                        .lines()
+                                        .last()
+                                        .unwrap_or("")
+                                        .trim_start()
+                                        .starts_with('#'),
+                            )
+                    };
+                    range.primary.index = map(range.primary.index).min(self.text.chars().count());
+                    range.secondary.index =
+                        map(range.secondary.index).min(self.text.chars().count());
+                    let mut state = output.state;
+                    state.cursor.set_char_range(Some(range));
+                    state.store(ctx, id);
+                }
+                self.last_edit = Some(std::time::Instant::now());
+                self.log = "Изменения будут сохранены…".into();
+            }
+        });
     }
     fn load(&mut self) {
         self.report.clear();
@@ -303,43 +310,46 @@ impl App {
                 self.management_ui(ui);
             }
             1 => {
-                ui.heading("Game Filter");
-                ui.horizontal_wrapped(|ui| {
-                    for (value, label) in [
-                        ("disabled", "Отключён"),
-                        ("all", "TCP и UDP"),
-                        ("tcp", "TCP"),
-                        ("udp", "UDP"),
-                    ] {
-                        let fill = if self.mode == value {
-                            ui.visuals().selection.bg_fill
+                page_title(ui, "Фильтры");
+                settings_card(ui, |ui| {
+                    section_title(ui, "Game Filter");
+                    ui.horizontal_wrapped(|ui| {
+                        for (value, label) in [
+                            ("disabled", "Отключён"),
+                            ("all", "TCP и UDP"),
+                            ("tcp", "TCP"),
+                            ("udp", "UDP"),
+                        ] {
+                            let fill = if self.mode == value {
+                                ui.visuals().selection.bg_fill
+                            } else {
+                                ui.visuals().widgets.inactive.weak_bg_fill
+                            };
+                            if ui.add(egui::Button::new(label).fill(fill)).clicked() {
+                                self.mode = value.into();
+                            }
+                        }
+                    });
+                    ui.label("TCP: порты и диапазоны через запятую");
+                    ui.text_edit_singleline(&mut self.tcp);
+                    ui.label("UDP");
+                    ui.text_edit_singleline(&mut self.udp);
+                    if ui.button("Сохранить настройки").clicked() {
+                        if backend::valid_ports(&self.tcp) && backend::valid_ports(&self.udp) {
+                            let p = self
+                                .config
+                                .root
+                                .as_ref()
+                                .unwrap()
+                                .join("utils/game_filter.enabled");
+                            self.log=match fs::write(p,format!("mode={}\ntcp={}\nudp={}\n",self.mode,self.tcp,self.udp)){Ok(_)=>"Сохранено. Для службы повторно примените выбранную стратегию на вкладке «Управление».".into(),Err(e)=>e.to_string()};
                         } else {
-                            ui.visuals().widgets.inactive.weak_bg_fill
-                        };
-                        if ui.add(egui::Button::new(label).fill(fill)).clicked() {
-                            self.mode = value.into();
+                            self.log =
+                            "Проверьте порты: допустимы значения 1–65535 и возрастающие диапазоны."
+                                .into()
                         }
                     }
                 });
-                ui.label("TCP: порты и диапазоны через запятую");
-                ui.text_edit_singleline(&mut self.tcp);
-                ui.label("UDP");
-                ui.text_edit_singleline(&mut self.udp);
-                if ui.button("Сохранить настройки").clicked() {
-                    if backend::valid_ports(&self.tcp) && backend::valid_ports(&self.udp) {
-                        let p = self
-                            .config
-                            .root
-                            .as_ref()
-                            .unwrap()
-                            .join("utils/game_filter.enabled");
-                        self.log=match fs::write(p,format!("mode={}\ntcp={}\nudp={}\n",self.mode,self.tcp,self.udp)){Ok(_)=>"Сохранено. Для службы повторно примените выбранную стратегию на вкладке «Управление».".into(),Err(e)=>e.to_string()};
-                    } else {
-                        self.log =
-                            "Проверьте порты: допустимы значения 1–65535 и возрастающие диапазоны."
-                                .into()
-                    }
-                }
                 self.ipset_ui(ui);
             }
             2 => {
@@ -349,60 +359,64 @@ impl App {
                 self.tests_ui(ui);
             }
             4 => {
-                ui.heading("Диагностика");
-                ui.label("Проверка не меняет настройки Windows и файлы Zapret. Предупреждения указывают на возможную причину, а не подтверждают неисправность.");
-                ui.horizontal(|ui| {
-                    if ui.button("Запустить проверку").clicked() {
-                        self.launch("diagnostics".into());
+                page_title(ui, "Диагностика");
+                settings_card(ui, |ui| {
+                    ui.weak("Проверка не меняет настройки Windows и файлы Zapret. Предупреждения указывают на возможную причину, а не подтверждают неисправность.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Запустить проверку").clicked() {
+                            self.launch("diagnostics".into());
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.report.is_empty(),
+                                egui::Button::new("Копировать отчёт"),
+                            )
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(
+                                self.report
+                                    .iter()
+                                    .map(|c| format!("[{}] {}: {}", c.level, c.title, c.detail))
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                            );
+                        }
+                    });
+                    ui.separator();
+                    if self.report.is_empty() {
+                        ui.weak("Проверка ещё не запускалась.");
                     }
-                    if ui
-                        .add_enabled(
-                            !self.report.is_empty(),
-                            egui::Button::new("Копировать отчёт"),
-                        )
-                        .clicked()
-                    {
-                        ui.ctx().copy_text(
-                            self.report
-                                .iter()
-                                .map(|c| format!("[{}] {}: {}", c.level, c.title, c.detail))
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        );
-                    }
-                });
-                ui.separator();
-                if self.report.is_empty() {
-                    ui.weak("Проверка ещё не запускалась.");
-                }
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for check in &self.report {
-                        let (label, color) = match check.level.as_str() {
-                            "ok" => ("В порядке", egui::Color32::from_rgb(115, 200, 150)),
-                            "warn" => ("Внимание", egui::Color32::from_rgb(235, 190, 100)),
-                            "unknown" => ("Не проверено", egui::Color32::from_rgb(230, 140, 140)),
-                            _ => ("Информация", egui::Color32::from_rgb(140, 185, 230)),
-                        };
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
-                            ui.horizontal_wrapped(|ui| {
-                                ui.strong(&check.title);
-                                ui.colored_label(color, label);
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for check in &self.report {
+                            let (label, color) = match check.level.as_str() {
+                                "ok" => ("В порядке", egui::Color32::from_rgb(115, 200, 150)),
+                                "warn" => ("Внимание", egui::Color32::from_rgb(235, 190, 100)),
+                                "unknown" => {
+                                    ("Не проверено", egui::Color32::from_rgb(230, 140, 140))
+                                }
+                                _ => ("Информация", egui::Color32::from_rgb(140, 185, 230)),
+                            };
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.strong(&check.title);
+                                    ui.colored_label(color, label);
+                                });
+                                ui.label(&check.detail);
+                                if check.title == "Базовая фильтрация Windows"
+                                    && check.level == "warn"
+                                    && ui.button("Запустить BFE…").clicked()
+                                {
+                                    self.confirm = Some("fix_bfe".into());
+                                }
+                                if check.title == "TCP timestamps"
+                                    && ui.button("Включить TCP timestamps…").clicked()
+                                {
+                                    self.confirm = Some("fix_timestamps".into());
+                                }
                             });
-                            ui.label(&check.detail);
-                            if check.title == "Базовая фильтрация Windows"
-                                && check.level == "warn"
-                                && ui.button("Запустить BFE…").clicked()
-                            {
-                                self.confirm = Some("fix_bfe".into());
-                            }
-                            if check.title == "TCP timestamps"
-                                && ui.button("Включить TCP timestamps…").clicked()
-                            {
-                                self.confirm = Some("fix_timestamps".into());
-                            }
-                        });
-                    }
+                        }
+                    });
                 });
             }
             5 => {
@@ -411,6 +425,7 @@ impl App {
             6 => {
                 self.updates_ui(ui);
             }
+            7 => self.sites_ui(ui),
             _ => {
                 self.management_ui(ui);
             }
@@ -430,7 +445,7 @@ impl App {
     fn status_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.image((self.logo.id(), egui::vec2(32., 32.)));
-            ui.heading("Zapret GUI");
+            ui.heading("GUI-for-zapret-FS");
             ui.add_space(18.);
             let (text, color) = match &self.snapshot {
                 Some(s) if s.service_running && s.standalone => (
@@ -503,18 +518,12 @@ impl App {
     }
     fn management_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(8.);
-        ui.label(
-            egui::RichText::new("УПРАВЛЕНИЕ ZAPRET")
-                .small()
-                .color(egui::Color32::from_rgb(119, 184, 250)),
-        );
-        ui.heading(self.strategy.trim_end_matches(".bat"));
-        ui.weak("Выберите стратегию слева для отдельного запуска или установки службы.");
+        page_title(ui, "Управление Zapret");
         ui.add_space(12.);
         egui::Frame::group(ui.style())
             .inner_margin(egui::Margin::same(16.))
             .rounding(10.)
-            .fill(egui::Color32::from_rgb(32, 40, 51))
+            .fill(egui::Color32::from_rgb(38, 46, 57))
             .show(ui, |ui| {
                 ui.set_min_width((ui.available_width() - 8.).max(0.));
                 ui.label("Выбранная стратегия");
@@ -529,15 +538,14 @@ impl App {
                         "Сохранена в службе (это не статус запуска)",
                     );
                 }
-                ui.weak("После применения служба запускается автоматически вместе с Windows.");
             });
         ui.add_space(12.);
         let standalone = self.snapshot.as_ref().is_some_and(|s| s.standalone);
         let service = self.snapshot.as_ref().is_some_and(|s| s.service_exists);
         let running = self.snapshot.as_ref().is_some_and(|s| s.service_running);
         let ready = self.snapshot.is_some() && self.snapshot_error.is_empty() && self.rx.is_none();
-        ui.group(|ui| {
-            ui.strong("Отдельный запуск батником");
+        settings_card(ui, |ui| {
+            section_title(ui, "Отдельный запуск батником");
             ui.label(if self.snapshot.is_none() {
                 "Состояние уточняется"
             } else if standalone {
@@ -560,15 +568,52 @@ impl App {
             ui.weak("Для остановки закройте окно запущенного батника крестиком.");
         });
         ui.add_space(10.);
-        ui.group(|ui| {
-            ui.strong("Служба Windows — zapret");
-            ui.label(if self.snapshot.is_none() { "Состояние уточняется" } else if running { "Работает" } else if service { "Установлена, остановлена" } else { "Не установлена" });
-            if let Some(s) = &self.snapshot { if service { ui.label(format!("Стратегия службы: {}", s.strategy)); } }
+        settings_card(ui, |ui| {
+            section_title(ui, "Служба Windows — zapret");
+            ui.label(if self.snapshot.is_none() {
+                "Состояние уточняется"
+            } else if running {
+                "Работает"
+            } else if service {
+                "Установлена, остановлена"
+            } else {
+                "Не установлена"
+            });
+            if let Some(s) = &self.snapshot {
+                if service {
+                    ui.label(format!("Стратегия службы: {}", s.strategy));
+                }
+            }
             ui.weak("Запуск службы использует сохранённую стратегию. Установка включает автозапуск с Windows.");
             ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(ready && !standalone, egui::Button::new(if service { "Применить стратегию и перезапустить службу…" } else { "Установить и запустить службу…" })).clicked() { self.confirm = Some("install".into()); }
-                if ui.add_enabled(ready && service && !running && !standalone, egui::Button::new("Запустить службу")).clicked() { self.launch("start".into()); }
-                if ui.add_enabled(ready && running, egui::Button::new("Остановить службу")).clicked() { self.launch("stop".into()); }
+                if ui
+                    .add_enabled(
+                        ready && !standalone,
+                        egui::Button::new(if service {
+                            "Применить стратегию и перезапустить службу…"
+                        } else {
+                            "Установить и запустить службу…"
+                        }),
+                    )
+                    .clicked()
+                {
+                    self.confirm = Some("install".into());
+                }
+                if ui
+                    .add_enabled(
+                        ready && service && !running && !standalone,
+                        egui::Button::new("Запустить службу"),
+                    )
+                    .clicked()
+                {
+                    self.launch("start".into());
+                }
+                if ui
+                    .add_enabled(ready && running, egui::Button::new("Остановить службу"))
+                    .clicked()
+                {
+                    self.launch("stop".into());
+                }
             });
         });
         if standalone {
@@ -614,93 +659,263 @@ impl App {
             };
         }
     }
-    fn updates_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Обновления Flowseal");
-        let current = updates::local(self.config.root.as_ref().unwrap());
-        match &current {
-            Ok(v) => {
-                ui.label(format!("Установленная версия: {v}"));
-            }
-            Err(e) => {
-                ui.colored_label(egui::Color32::LIGHT_RED, e);
-            }
-        }
-        if let Some(latest) = &self.updates.latest {
-            ui.label(format!("Версия в источнике Flowseal: {latest}"));
-            if let Ok(current) = &current {
-                match updates::compare(current, latest) {
-                    Some(std::cmp::Ordering::Less) => {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(235, 190, 100),
-                            "Доступна новая версия",
-                        );
+    fn sites_ui(&mut self, ui: &mut egui::Ui) {
+        page_title(ui, "Добавить сайт из браузера");
+        ui.weak("Выберите сайт из вкладок браузера или истории либо введите адрес вручную.");
+        ui.columns(2, |columns| {
+            settings_card(&mut columns[0], |ui| {
+                section_title(ui, "Браузер и источник");
+        ui.add_enabled_ui(self.sites.rx.is_none(), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for browser in browser_sites::Browser::ALL {
+                    if ui
+                        .add(
+                            egui::Button::new(browser.name())
+                                .selected(self.sites.browser == browser),
+                        )
+                        .clicked()
+                        && self.sites.browser != browser
+                    {
+                        self.sites.browser = browser;
+                        self.sites.discovery = Default::default();
+                        self.sites.source.clear();
                     }
-                    Some(std::cmp::Ordering::Equal) => {
-                        ui.colored_label(
-                            egui::Color32::LIGHT_GREEN,
-                            "Установленная версия совпадает с источником",
-                        );
-                    }
-                    Some(std::cmp::Ordering::Greater) => {
-                        ui.label("Установленная версия новее указанной в источнике");
-                    }
-                    _ => {}
                 }
+            });
+            if self.sites.browser != browser_sites::Browser::Firefox {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Порт CDP:");
+                    ui.add(egui::DragValue::new(&mut self.sites.port).range(1..=65535));
+                    ui.weak("127.0.0.1 — подключённый Chromium-браузер");
+                });
             }
-        } else {
-            ui.weak("Доступная версия ещё не определена");
-        }
-        if ui
-            .add_enabled(
-                self.updates.rx.is_none(),
-                egui::Button::new("Проверить обновления"),
-            )
-            .clicked()
-        {
-            self.updates.start();
-        }
-        if self.updates.rx.is_some() {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Найти сайты").clicked() {
+                    self.sites.start(false);
+                }
+                if ui.button("Только история").clicked() {
+                    self.sites.start(true);
+                }
+                if ui.button("Выбрать файл истории…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Выберите History (Chromium) или places.sqlite (Firefox)")
+                        .pick_file()
+                    {
+                        let browser = self.sites.browser;
+                        let (tx, rx) = mpsc::channel();
+                        self.sites.rx = Some(rx);
+                        self.sites.discovery = Default::default();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(browser_sites::custom_history(path, browser));
+                        });
+                    }
+                }
+            });
+        });
+        if self.sites.rx.is_some() {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Проверка источника Flowseal…");
+                ui.label("Чтение сайтов…");
             });
         }
-        if !self.updates.error.is_empty() {
-            ui.colored_label(egui::Color32::LIGHT_RED, &self.updates.error);
+        ui.collapsing("Как подключить браузер", |ui| {
+            ui.label("Chrome / Opera / Edge: CDP доступен при запуске браузера с --remote-debugging-port=9222. Chrome 136+ дополнительно требует --user-data-dir с отдельной папкой профиля. Программа не перезапускает браузер и не меняет ярлыки.");
+            ui.label("CDP показывает вкладки браузера, подключённого к указанному порту; он может отличаться от выбранного выше браузера истории. Выберите нужный сайт в списке.");
+            ui.label("Firefox: используется история. История показывает последние записанные посещения, которые могут отличаться от текущей вкладки. Приватные посещения в историю не попадают.");
+        });
+        for note in &self.sites.discovery.notes {
+            ui.weak(note);
         }
-        if let Some(checked) = &self.updates.checked {
-            ui.weak(checked);
+            });
+            settings_card(&mut columns[1], |ui| {
+                section_title(ui, "Добавление домена");
+        ui.add_space(6.);
+        ui.label("Домен или адрес сайта");
+        let input = ui.scope(|ui| {
+            ui.visuals_mut().extreme_bg_color = egui::Color32::from_rgb(14, 18, 24);
+            ui.add(egui::TextEdit::singleline(&mut self.sites.domain).desired_width(f32::INFINITY))
+        }).inner;
+        if input.changed() {
+            self.sites.source = "Введён вручную".into();
+            self.sites.message.clear();
         }
-        ui.add_space(12.);
-        if ui
-            .add_enabled(
-                !self.tests.busy() && !self.tests.needs_recovery() && self.updates.rx.is_none(),
-                egui::Button::new("Обновить Zapret с сохранением списков"),
-            )
-            .clicked()
-        {
-            if self.save_editor() {
-                if !self.config_path.exists() {
-                    if let Err(error) = fs::write(
-                        &self.config_path,
-                        serde_json::to_vec_pretty(&self.config).unwrap(),
+        if !self.sites.source.is_empty() {
+            ui.weak(&self.sites.source);
+        }
+        let parsed = browser_sites::domain(&self.sites.domain);
+        if let Ok(domain) = &parsed {
+            ui.label(format!("Будет добавлен домен: {domain}"));
+        }
+        ui.horizontal_wrapped(|ui| {
+            for (exclude, label) in [(false, "Через Zapret"), (true, "Исключить из Zapret")]
+            {
+                if ui
+                    .add_enabled(parsed.is_ok(), egui::Button::new(label))
+                    .clicked()
+                    && self.save_editor()
+                {
+                    match list_store::add_domain(
+                        self.config.root.as_ref().unwrap(),
+                        &self.sites.domain,
+                        exclude,
                     ) {
-                        self.updates.error = format!("Не удалось сохранить настройки: {error}");
-                        return;
+                        Ok(message) => {
+                            self.sites.message = message.clone();
+                            self.log = message;
+                            if let Some(path) = self.selected.clone() {
+                                self.open_list(path);
+                            }
+                        }
+                        Err(error) => {
+                            self.sites.message = error.clone();
+                            self.log = error;
+                        }
                     }
                 }
-                self.log = "Обновление Zapret: подтверждение Windows, загрузка релиза, перенос пользовательских списков и переключение папки…".into();
-                self.updates
-                    .start_install(self.config.root.clone().unwrap(), self.config_path.clone());
+            }
+        });
+        if !self.sites.message.is_empty() {
+            ui.label(&self.sites.message);
+        }
+        ui.weak("Начальный www. убирается, остальные поддомены сохраняются. Повторы и прежняя запись с www. удаляются; домен убирается из противоположного user-листа.");
+            });
+        });
+        ui.add_space(8.);
+        section_title(ui, "Найденные сайты");
+        let mut selected = None;
+        for (index, site) in self.sites.discovery.sites.iter().enumerate() {
+            let source = if site.visited > 0 {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let minutes = now.saturating_sub(site.visited as u64) / 60;
+                let age = if minutes < 1 {
+                    "меньше минуты назад".into()
+                } else if minutes < 60 {
+                    format!("{minutes} мин. назад")
+                } else if minutes < 1440 {
+                    format!("{} ч. назад", minutes / 60)
+                } else {
+                    format!("{} дн. назад", minutes / 1440)
+                };
+                format!("{} · {age}", site.source)
+            } else {
+                site.source.clone()
+            };
+            let title: String = site
+                .title
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .take(100)
+                .collect();
+            let label = format!("{}\n{}\n{}", site.domain, title, source);
+            if site_button(ui, label, self.sites.domain == site.domain)
+                .on_hover_text(&site.url)
+                .clicked()
+            {
+                selected = Some(index);
             }
         }
-        ui.hyperlink_to("Открыть страницу загрузки Flowseal", updates::DOWNLOAD);
-        ui.label("Обновление скачивает последний релиз GitHub в папку с номером версии и переносит все user-листы, их резервные копии и дополнительные списки. Старая папка сохраняется. Служба переключается на новую папку с сохранением её состояния. Отдельный батник перед обновлением закройте.");
-        ui.weak("Совместимость функций приложения проверялась на Flowseal 1.10.4; наличие новой версии не означает проверенную совместимость с ней.");
+        if let Some(index) = selected {
+            let site = &self.sites.discovery.sites[index];
+            self.sites.domain = site.domain.clone();
+            self.sites.source = site.source.clone();
+            self.sites.message.clear();
+        }
+        if self.sites.discovery.sites.is_empty() && self.sites.rx.is_none() {
+            ui.weak("Список пока пуст.");
+        }
+    }
+    fn updates_ui(&mut self, ui: &mut egui::Ui) {
+        page_title(ui, "Обновления Flowseal");
+        settings_card(ui, |ui| {
+            let current = updates::local(self.config.root.as_ref().unwrap());
+            match &current {
+                Ok(v) => {
+                    ui.label(format!("Установленная версия: {v}"));
+                }
+                Err(e) => {
+                    ui.colored_label(egui::Color32::LIGHT_RED, e);
+                }
+            }
+            if let Some(latest) = &self.updates.latest {
+                ui.label(format!("Версия в источнике Flowseal: {latest}"));
+                if let Ok(current) = &current {
+                    match updates::compare(current, latest) {
+                        Some(std::cmp::Ordering::Less) => {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(235, 190, 100),
+                                "Доступна новая версия",
+                            );
+                        }
+                        Some(std::cmp::Ordering::Equal) => {
+                            ui.colored_label(
+                                egui::Color32::LIGHT_GREEN,
+                                "Установленная версия совпадает с источником",
+                            );
+                        }
+                        Some(std::cmp::Ordering::Greater) => {
+                            ui.label("Установленная версия новее указанной в источнике");
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                ui.weak("Доступная версия ещё не определена");
+            }
+            if ui
+                .add_enabled(
+                    self.updates.rx.is_none(),
+                    egui::Button::new("Проверить обновления"),
+                )
+                .clicked()
+            {
+                self.updates.start();
+            }
+            if self.updates.rx.is_some() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Проверка источника Flowseal…");
+                });
+            }
+            if !self.updates.error.is_empty() {
+                ui.colored_label(egui::Color32::LIGHT_RED, &self.updates.error);
+            }
+            if let Some(checked) = &self.updates.checked {
+                ui.weak(checked);
+            }
+            ui.add_space(12.);
+            if ui
+                .add_enabled(
+                    !self.tests.busy() && !self.tests.needs_recovery() && self.updates.rx.is_none(),
+                    egui::Button::new("Обновить Zapret с сохранением списков"),
+                )
+                .clicked()
+            {
+                if self.save_editor() {
+                    if !self.config_path.exists() {
+                        if let Err(error) = fs::write(
+                            &self.config_path,
+                            serde_json::to_vec_pretty(&self.config).unwrap(),
+                        ) {
+                            self.updates.error = format!("Не удалось сохранить настройки: {error}");
+                            return;
+                        }
+                    }
+                    self.log = "Обновление Zapret: подтверждение Windows, загрузка релиза, перенос пользовательских списков и переключение папки…".into();
+                    self.updates
+                        .start_install(self.config.root.clone().unwrap(), self.config_path.clone());
+                }
+            }
+            ui.hyperlink_to("Открыть страницу загрузки Flowseal", updates::DOWNLOAD);
+            ui.weak("Обновление скачивает последний релиз GitHub в папку с номером версии и переносит все user-листы, их резервные копии и дополнительные списки. Старая папка сохраняется. Служба переключается на новую папку с сохранением её состояния. Отдельный батник перед обновлением закройте.");
+            ui.weak("Совместимость функций приложения проверялась на Flowseal 1.10.4; наличие новой версии не означает проверенную совместимость с ней.");
+        });
     }
     fn tests_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Тестирование стратегий");
-        ui.label("HTTP/TLS/ping проверяет доступность сайтов. DPI TCP 16–20 проверяет возможное зависание передачи данных. Служба и отдельный winws из выбранной папки восстанавливаются после теста.");
+        page_title(ui, "Тестирование стратегий");
+        ui.weak("HTTP/TLS/ping проверяет доступность сайтов. DPI TCP 16–20 проверяет возможное зависание передачи данных. Служба и отдельный winws из выбранной папки восстанавливаются после теста.");
         let busy = self.tests.busy();
         if self.tests.needs_recovery() && !busy {
             ui.colored_label(
@@ -716,8 +931,9 @@ impl App {
         }
         let root = self.config.root.clone().unwrap();
         ui.columns(2, |columns| {
-            columns[0].heading("Стратегии");
-            columns[0].add_enabled_ui(!busy && !self.tests.needs_recovery(), |ui| {
+            settings_card(&mut columns[0], |ui| {
+            section_title(ui, "Стратегии");
+            ui.add_enabled_ui(!busy && !self.tests.needs_recovery(), |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("Все").clicked() {
                         self.tests.selected = backend::strategies(&root).into_iter().collect();
@@ -742,8 +958,9 @@ impl App {
                         }
                     });
             });
-            let ui = &mut columns[1];
-            ui.heading("Проверка");
+            });
+            settings_card(&mut columns[1], |ui| {
+            section_title(ui, "Проверка");
             ui.add_enabled_ui(!busy,|ui|{ui.horizontal_wrapped(|ui|{for (value, label) in [(false, "HTTP / TLS / ping"), (true, "DPI TCP 16–20")] { let selected = self.tests.dpi == value; let fill = if selected { ui.visuals().selection.bg_fill } else { ui.visuals().widgets.inactive.weak_bg_fill }; if ui.add(egui::Button::new(label).fill(fill)).clicked() { self.tests.dpi = value; } }});if self.tests.dpi {ui.label("Свой хост (пусто — набор dpi-checkers)");ui.text_edit_singleline(&mut self.tests.dpi_host);ui.horizontal(|ui|{ui.label("Размер данных, байт");ui.add(egui::DragValue::new(&mut self.tests.range_bytes).range(16384..=1048576));});ui.weak("IPSet временно переключается на любые IP и восстанавливается после теста. Возможна блокировка — это признак, а не доказательство.");}});
             ui.add_enabled_ui(!busy, |ui| {
                 ui.horizontal(|ui| {
@@ -780,6 +997,7 @@ impl App {
                 "Отчёт: {}",
                 self.tests.dir.join("report.json").display()
             ));
+            });
         });
         let report = &self.tests.report;
         ui.separator();
@@ -900,99 +1118,104 @@ impl App {
         }
     }
     fn fakes_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Активные fake-файлы");
-        ui.label("Выберите содержимое для Discord UDP или Game Filter UDP. Список соответствует .bin-файлам сборки. Перед заменой сохраняется предыдущий файл; применение требует перезапуска Zapret.");
-        let root = self.config.root.as_ref().unwrap();
-        match fakes::available(root) {
-            Ok(files) => {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.columns(2, |columns| {
-                        for (column, (target, label)) in columns.iter_mut().zip(fakes::TARGETS) {
-                            column.heading(label);
-                            let active = fakes::current(root, target, &files);
-                            column.label(format!(
-                                "Текущий: {}",
-                                if active.is_empty() {
-                                    "Не совпадает с файлами сборки"
-                                } else {
-                                    &active
-                                }
-                            ));
-                            if column
-                                .add_enabled(
-                                    root.join("bin").join(format!("{target}.backup")).is_file(),
-                                    egui::Button::new("Восстановить предыдущий"),
-                                )
-                                .clicked()
+        page_title(ui, "Активные fake-файлы");
+        settings_card(ui, |ui| {
+            ui.weak("Выберите содержимое для Discord UDP или Game Filter UDP. Список соответствует .bin-файлам сборки. Перед заменой сохраняется предыдущий файл; применение требует перезапуска Zapret.");
+            let root = self.config.root.as_ref().unwrap();
+            match fakes::available(root) {
+                Ok(files) => {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.columns(2, |columns| {
+                            for (column, (target, label)) in columns.iter_mut().zip(fakes::TARGETS)
                             {
-                                self.fake_confirm = Some((target.into(), String::new()));
-                            }
-                            column.separator();
-                            if files.is_empty() {
-                                column.weak("Доступные .bin-файлы не найдены");
-                            }
-                            for name in &files {
+                                section_title(column, label);
+                                let active = fakes::current(root, target, &files);
+                                column.label(format!(
+                                    "Текущий: {}",
+                                    if active.is_empty() {
+                                        "Не совпадает с файлами сборки"
+                                    } else {
+                                        &active
+                                    }
+                                ));
                                 if column
-                                    .add_sized(
-                                        [column.available_width(), 30.],
-                                        egui::Button::new(name)
-                                            .selected(active.split(", ").any(|n| n == name)),
+                                    .add_enabled(
+                                        root.join("bin").join(format!("{target}.backup")).is_file(),
+                                        egui::Button::new("Восстановить предыдущий"),
                                     )
                                     .clicked()
                                 {
-                                    self.fake_confirm = Some((target.into(), name.clone()));
+                                    self.fake_confirm = Some((target.into(), String::new()));
+                                }
+                                column.separator();
+                                if files.is_empty() {
+                                    column.weak("Доступные .bin-файлы не найдены");
+                                }
+                                for name in &files {
+                                    if column
+                                        .add_sized(
+                                            [column.available_width(), 30.],
+                                            egui::Button::new(name)
+                                                .selected(active.split(", ").any(|n| n == name)),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.fake_confirm = Some((target.into(), name.clone()));
+                                    }
                                 }
                             }
-                        }
+                        });
                     });
-                });
+                }
+                Err(e) => {
+                    ui.label(format!("Не удалось прочитать fake-файлы: {e}"));
+                }
             }
-            Err(e) => {
-                ui.label(format!("Не удалось прочитать fake-файлы: {e}"));
-            }
-        }
+        });
     }
     fn ipset_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(20.);
         ui.separator();
-        ui.heading("IPSet Filter");
-        let root = self.config.root.as_ref().unwrap();
-        let state = ipset::status(root);
-        let current = state.as_ref().copied().unwrap_or("unknown");
-        ui.label(format!(
-            "Текущий режим: {}",
-            match current {
-                "loaded" => "По списку",
-                "none" => "Отключён",
-                "any" => "Любые IP",
-                _ => "Не удалось прочитать список",
-            }
-        ));
-        if let Err(e) = state {
-            ui.weak(e);
-        }
-        ui.label("По списку — IPSet-правила используют адреса из файла. Отключён — файл содержит служебный адрес. Любые IP — файл пустой, IPSet-правила могут охватывать любые адреса.");
-        ui.horizontal_wrapped(|ui| {
-            for (mode, label) in [
-                ("loaded", "По списку"),
-                ("none", "Отключён"),
-                ("any", "Любые IP"),
-            ] {
-                if ui
-                    .add_enabled(
-                        current != mode,
-                        egui::Button::new(label).selected(current == mode),
-                    )
-                    .clicked()
-                {
-                    self.launch(format!("ipset:{mode}"));
+        settings_card(ui, |ui| {
+            section_title(ui, "IPSet Filter");
+            let root = self.config.root.as_ref().unwrap();
+            let state = ipset::status(root);
+            let current = state.as_ref().copied().unwrap_or("unknown");
+            ui.label(format!(
+                "Текущий режим: {}",
+                match current {
+                    "loaded" => "По списку",
+                    "none" => "Отключён",
+                    "any" => "Любые IP",
+                    _ => "Не удалось прочитать список",
                 }
+            ));
+            if let Err(e) = state {
+                ui.weak(e);
             }
+            ui.weak("По списку — IPSet-правила используют адреса из файла. Отключён — файл содержит служебный адрес. Любые IP — файл пустой, IPSet-правила могут охватывать любые адреса.");
+            ui.horizontal_wrapped(|ui| {
+                for (mode, label) in [
+                    ("loaded", "По списку"),
+                    ("none", "Отключён"),
+                    ("any", "Любые IP"),
+                ] {
+                    if ui
+                        .add_enabled(
+                            current != mode,
+                            egui::Button::new(label).selected(current == mode),
+                        )
+                        .clicked()
+                    {
+                        self.launch(format!("ipset:{mode}"));
+                    }
+                }
+            });
+            if ui.button("Обновить список Flowseal").clicked() {
+                self.launch("ipset:update".into());
+            }
+            ui.weak("Резервная копия: lists/ipset-all.txt.backup. Обновление сохраняет выбранный режим. Настройка относится к IPSet-правилам стратегии; доменные правила работают отдельно.");
         });
-        if ui.button("Обновить список Flowseal").clicked() {
-            self.launch("ipset:update".into());
-        }
-        ui.weak("Резервная копия: lists/ipset-all.txt.backup. Обновление сохраняет выбранный режим. Настройка относится к IPSet-правилам стратегии; доменные правила работают отдельно.");
     }
     fn launch(&mut self, action: String) {
         if self.tests.busy() || self.tests.needs_recovery() {
@@ -1056,6 +1279,10 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.tests.poll();
+        self.sites.poll();
+        if self.sites.rx.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         self.updates.poll();
         if let Some(rx) = &self.updates.install_rx {
             let result = match rx.try_recv() {
@@ -1174,7 +1401,7 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("top")
             .frame(
                 egui::Frame::none()
-                    .fill(egui::Color32::from_rgb(30, 36, 45))
+                    .fill(egui::Color32::from_rgb(36, 42, 51))
                     .inner_margin(egui::Margin::symmetric(20., 12.)),
             )
             .show(ctx, |ui| {
@@ -1213,13 +1440,14 @@ impl eframe::App for App {
             .exact_width(170.)
             .frame(
                 egui::Frame::none()
-                    .fill(egui::Color32::from_rgb(25, 30, 38))
+                    .fill(egui::Color32::from_rgb(31, 36, 44))
                     .inner_margin(12.),
             )
             .show(ctx, |ui| {
                 ui.add_space(10.);
                 for (id, name) in [
                     (0, "Управление"),
+                    (7, "Добавить сайт"),
                     (2, "Списки"),
                     (3, "Тесты"),
                     (4, "Диагностика"),
@@ -1241,7 +1469,7 @@ impl eframe::App for App {
                     }
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.weak("Zapret GUI · 0.1");
+                    ui.weak("GUI-for-zapret-FS · 0.1");
                     ui.label("Flowseal 1.10.4");
                     ui.weak("Совместимость");
                 });
@@ -1251,11 +1479,14 @@ impl eframe::App for App {
                 .default_width(238.)
                 .width_range(200. ..=440.)
                 .show(ctx, |ui| {
-                    ui.heading(if self.tab == 0 {
-                        "Стратегии"
-                    } else {
-                        "Листы"
-                    });
+                    section_title(
+                        ui,
+                        if self.tab == 0 {
+                            "Стратегии"
+                        } else {
+                            "Листы"
+                        },
+                    );
                     ui.separator();
                     ui.add_enabled_ui(
                         self.rx.is_none() && self.updates.install_rx.is_none(),
@@ -1321,10 +1552,14 @@ impl eframe::App for App {
                 });
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().inner_margin(22.))
+            .frame(
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(29, 33, 40))
+                    .inner_margin(22.),
+            )
             .show(ctx, |ui| {
                 if self.config.root.is_none() {
-                    ui.heading("Выберите папку Zapret");
+                    page_title(ui, "Выберите папку Zapret");
                     if ui.button("Выбрать папку…").clicked() {
                         self.pick_folder();
                     }
@@ -1352,7 +1587,7 @@ impl eframe::App for App {
                         && self.config.root.is_some()
                         && (self.tab == 3 || (!self.tests.busy() && !self.tests.needs_recovery())),
                     |ui| {
-                        if [0, 1, 6].contains(&self.tab) {
+                        if [0, 1, 6, 7].contains(&self.tab) {
                             egui::ScrollArea::vertical()
                                 .id_salt(("workspace", self.tab))
                                 .show(ui, |ui| self.workspace(ui, ctx));
@@ -1377,6 +1612,48 @@ impl eframe::App for App {
         }
     }
 }
+fn settings_card(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::group(ui.style())
+        .inner_margin(12.)
+        .rounding(6.)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            content(ui);
+        });
+}
+fn site_button(ui: &mut egui::Ui, label: String, selected: bool) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 76.), egui::Sense::click());
+    let visuals = ui.style().interact_selectable(&response, selected);
+    ui.painter().rect(
+        rect,
+        visuals.rounding,
+        visuals.weak_bg_fill,
+        visuals.bg_stroke,
+    );
+    let text_rect = rect.shrink2(egui::vec2(12., 8.));
+    let galley = ui.painter().layout(
+        label,
+        egui::FontId::proportional(13.),
+        visuals.text_color(),
+        text_rect.width(),
+    );
+    ui.painter()
+        .with_clip_rect(text_rect)
+        .galley(text_rect.min, galley, visuals.text_color());
+    response
+}
+fn page_title(ui: &mut egui::Ui, title: &str) {
+    ui.label(
+        egui::RichText::new(title)
+            .size(22.)
+            .strong()
+            .color(egui::Color32::from_rgb(119, 184, 250)),
+    );
+}
+fn section_title(ui: &mut egui::Ui, title: &str) {
+    ui.label(egui::RichText::new(title).size(17.).strong());
+}
 fn result_color(value: &str) -> egui::Color32 {
     match value {
         "OK" => egui::Color32::from_rgb(110, 210, 150),
@@ -1399,7 +1676,7 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
     eframe::run_native(
-        "Zapret GUI",
+        "GUI-for-zapret-FS",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_icon(

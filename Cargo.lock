@@ -1430,6 +1430,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gui-for-zapret-fs"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "rfd",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3987,16 +3998,6 @@ dependencies = [
  "quote",
  "syn 3.0.9",
  "synstructure",
-]
-
-[[package]]
-name = "zapret-gui"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "rfd",
- "serde",
- "serde_json",
 ]
 
 [[package]]

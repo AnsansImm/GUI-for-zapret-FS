@@ -33,6 +33,15 @@ pub fn normalize(input: &str, ip: bool) -> String {
         }
     }
     if !ip {
+        for line in &mut lines {
+            if line.len() > 4
+                && line
+                    .get(..4)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("www."))
+            {
+                line.drain(..4);
+            }
+        }
         let mut seen = std::collections::HashSet::new();
         lines.retain(|line| line.starts_with('#') || seen.insert(line.to_ascii_lowercase()));
     }
@@ -63,6 +72,13 @@ mod tests {
         assert_eq!(
             normalize("steamgames.com\nsteamgames.com \nSTEAMGAMES.COM\n# comment\nother.org steamgames.com\n# comment", false),
             "steamgames.com\n# comment\nother.org\n# comment"
+        );
+    }
+    #[test]
+    fn www_prefix_is_removed_before_deduplication() {
+        assert_eq!(
+            normalize("www.example.com\nexample.com WWW.example.com\nstore.example.com\n*.www.example.com\n# www.example.com", false),
+            "example.com\nstore.example.com\n*.www.example.com\n# www.example.com"
         );
     }
     #[test]

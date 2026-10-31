@@ -44,5 +44,8 @@ fn main() {
         .status()
         .expect("Windows SDK resource compiler is required");
     assert!(status.success(), "Failed to compile application icon");
-    println!("cargo:rustc-link-arg-bin=zapret-gui={}", compiled.display());
+    println!(
+        "cargo:rustc-link-arg-bin=gui-for-zapret-fs={}",
+        compiled.display()
+    );
 }
