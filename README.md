@@ -13,6 +13,10 @@
 - Диагностика, настройка Game Filter/IPSet и выбор fake-файлов.
 - Обновление Flowseal Zapret с GitHub с переносом пользовательских списков. Предыдущая папка сохраняется; служба и путь в настройках переключаются на новую версию.
 
+## Скачать
+
+[Скачать GUI-for-zapret-FS.exe](https://github.com/AnsansImm/GUI-for-zapret-FS/releases/latest/download/GUI-for-zapret-FS.exe) · [Все версии](https://github.com/AnsansImm/GUI-for-zapret-FS/releases)
+
 ## Запуск
 
 1. Скачайте и распакуйте [Flowseal Zapret](https://github.com/Flowseal/zapret-discord-youtube/releases/latest).
