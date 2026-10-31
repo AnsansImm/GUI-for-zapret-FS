@@ -32,6 +32,10 @@ pub fn normalize(input: &str, ip: bool) -> String {
             lines.push(token);
         }
     }
+    if !ip {
+        let mut seen = std::collections::HashSet::new();
+        lines.retain(|line| line.starts_with('#') || seen.insert(line.to_ascii_lowercase()));
+    }
     lines.join("\n")
 }
 pub fn editable(input: &str, ip: bool) -> String {
@@ -52,6 +56,13 @@ mod tests {
                 false
             ),
             "one.org\nbadhost\n*.site\n# Любой текст: @! / пробелы"
+        );
+    }
+    #[test]
+    fn duplicate_domains_preserve_first_and_comments() {
+        assert_eq!(
+            normalize("steamgames.com\nsteamgames.com \nSTEAMGAMES.COM\n# comment\nother.org steamgames.com\n# comment", false),
+            "steamgames.com\n# comment\nother.org\n# comment"
         );
     }
     #[test]

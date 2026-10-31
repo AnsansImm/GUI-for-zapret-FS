@@ -15,12 +15,6 @@ try {
         Move-Item -LiteralPath $taskExe -Destination $taskPrevious
     }
     Copy-Item -LiteralPath (Join-Path $taskCache 'zapret-gui.exe') -Destination $taskExe
-    $taskNativeSource=Join-Path $taskCache 'zapret-native.exe'
-    $taskNativeTarget=Join-Path $taskRelease 'zapret-native.exe'
-    if (!(Test-Path -LiteralPath $taskNativeTarget) -or (Get-FileHash -LiteralPath $taskNativeSource).Hash -ne (Get-FileHash -LiteralPath $taskNativeTarget).Hash) {
-        if (Test-Path -LiteralPath $taskNativeTarget) { Remove-Item -LiteralPath $taskNativeTarget }
-        Copy-Item -LiteralPath $taskNativeSource -Destination $taskNativeTarget
-    }
     Write-Output "Portable build: $taskRelease"
 } finally { Pop-Location }
 

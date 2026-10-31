@@ -123,11 +123,30 @@ pub fn valid_ports(s: &str) -> bool {
 pub fn helper(action: &str, root: &Path, strategy: &str) -> Result<String, String> {
     if matches!(action, "start" | "install") {
         let state = snapshot()?;
-        if state.winws && !state.service_running {
+        if state.standalone {
             return Err("Zapret уже запущен отдельно. Завершите отдельный winws перед запуском или перенастройкой службы.".into());
         }
     }
     match action {
+        "update_release" => super::updates::install(root, Path::new(strategy)),
+        "start_standalone" => {
+            let state = snapshot()?;
+            if state.winws || state.service_running {
+                return Err("Сначала остановите службу и отдельный запуск Zapret.".into());
+            }
+            strategy_args(root, strategy)?;
+            let bat = root.join(strategy).to_string_lossy().replace('\'', "''");
+            let script = format!("$ErrorActionPreference='Stop';Start-Process -FilePath '{bat}' -WorkingDirectory '{}'", root.to_string_lossy().replace('\'', "''"));
+            run(
+                "powershell.exe",
+                &["-NoProfile", "-NonInteractive", "-Command", &script],
+            )?;
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if !snapshot()?.standalone {
+                return Err("Батник не запустил winws. Проверьте его окно.".into());
+            }
+            Ok("Запущен отдельный батник.".into())
+        }
         "stop_standalone" => {
             let exe = root
                 .join("bin/winws.exe")
@@ -442,10 +461,11 @@ pub struct Snapshot {
     pub service_exists: bool,
     pub service_running: bool,
     pub winws: bool,
+    pub standalone: bool,
     pub strategy: String,
 }
 pub fn snapshot() -> Result<Snapshot, String> {
-    let script = r#"$ErrorActionPreference='Stop';$s=Get-Service zapret -ErrorAction SilentlyContinue;$strategy='';try{$strategy=[string](Get-ItemPropertyValue 'HKLM:\SYSTEM\CurrentControlSet\Services\zapret' -Name 'zapret-discord-youtube' -ErrorAction Stop)}catch{};[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false);@{service_exists=[bool]$s;service_running=[bool]($s -and $s.Status -eq 'Running');winws=[bool](Get-Process winws -ErrorAction SilentlyContinue);strategy=$strategy}|ConvertTo-Json -Compress"#;
+    let script = r#"$ErrorActionPreference='Stop';$s=Get-Service zapret -ErrorAction SilentlyContinue;$servicePids=@(Get-CimInstance Win32_Service -Filter 'ProcessId > 0' -OperationTimeoutSec 8|Select-Object -ExpandProperty ProcessId);$processes=@(Get-CimInstance Win32_Process -Filter "Name='winws.exe'" -OperationTimeoutSec 8);$strategy='';try{$strategy=[string](Get-ItemPropertyValue 'HKLM:\SYSTEM\CurrentControlSet\Services\zapret' -Name 'zapret-discord-youtube' -ErrorAction Stop)}catch{};[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false);@{service_exists=[bool]$s;service_running=[bool]($s -and $s.Status -eq 'Running');winws=[bool]$processes.Count;standalone=[bool](@($processes|Where-Object{$_.ProcessId -notin $servicePids}).Count);strategy=$strategy}|ConvertTo-Json -Compress"#;
     let data = run(
         "powershell.exe",
         &["-NoProfile", "-NonInteractive", "-Command", script],
