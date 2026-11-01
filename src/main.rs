@@ -47,6 +47,9 @@ struct App {
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Pin the theme before styling: system theme changes otherwise select
+        // egui's untouched light palette and mix it with our fixed dark fills.
+        cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let mut style = (*cc.egui_ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(10., 10.);
