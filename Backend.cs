@@ -18,7 +18,7 @@ static class Backend
   var game=Path.Combine(root,"utils","game_filter.enabled");var settings=File.Exists(game)?File.ReadAllLines(game):[];
   string Get(string k)=>settings.FirstOrDefault(x=>x.StartsWith(k+"="))?[(k.Length+1)..].Trim()??"";
   string Port(string k){if(Get("mode")!="all"&&Get("mode")!=k)return "12";var p=Get(k);if(p=="")p="1024-65535";if(!Ports(p))throw new IOException("Неверные порты");return p;}
-  var args=string.Join(" ",text[(index+marker.Length)..].Split('\n').Select(x=>x.Trim().TrimEnd('^').Trim())).Replace("%BIN%",Path.Combine(root,"bin")+"\\").Replace("%LISTS%",Path.Combine(root,"lists")+"\\").Replace("%GameFilterTCP%",Port("tcp")).Replace("%GameFilterUDP%",Port("udp"));
+  var args=string.Join(" ",text[(index+marker.Length)..].Split('\n').Select(x=>x.Trim().TrimEnd('^').Trim())).Replace("%BIN%",Path.Combine(root,"bin")+Path.DirectorySeparatorChar).Replace("%LISTS%",Path.Combine(root,"lists")+Path.DirectorySeparatorChar).Replace("%GameFilterTCP%",Port("tcp")).Replace("%GameFilterUDP%",Port("udp"));
   if(args.IndexOfAny(['%','&','|','<','>','\r','\n'])>=0)throw new IOException("Неподдерживаемые параметры стратегии");return args.Trim();
  }
  public static async Task<string> Install(string root,string strategy)
@@ -27,15 +27,24 @@ static class Backend
   var lists=Path.Combine(root,"lists");Directory.CreateDirectory(lists);
   foreach(var item in new[]{("list-general-user.txt","domain.example.abc\n"),("list-exclude-user.txt","domain.example.abc\n"),("ipset-exclude-user.txt","203.0.113.113/32\n")})
    if(!File.Exists(Path.Combine(lists,item.Item1)))ListStore.Atomic(Path.Combine(lists,item.Item1),item.Item2);
-  var script = "$exe="+Quote(exe)+";$bin="+Quote("\""+exe+"\" "+args)+";$service=Get-Service zapret -ErrorAction SilentlyContinue;"+
+  var script = ". "+Quote(ServiceControlPath())+" -FunctionsOnly;$exe="+Quote(exe)+";$bin="+Quote("\""+exe+"\" "+args)+";$service=Get-Service zapret -ErrorAction SilentlyContinue;"+
    "$servicePids=@(Get-CimInstance Win32_Service -Filter 'ProcessId > 0' | Select-Object -ExpandProperty ProcessId);"+
    "$standalone=@(Get-CimInstance Win32_Process -Filter \"Name='winws.exe'\" | Where-Object {$_.ProcessId -notin $servicePids});if($standalone.Count){throw 'Сначала остановите отдельный winws'};"+
-   "if($service){Stop-Service zapret -ErrorAction Stop;$service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(20));Set-ItemProperty -LiteralPath 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\zapret' -Name ImagePath -Value $bin;Set-Service zapret -StartupType Automatic}"+
+   "if($service){Stop-Service zapret -ErrorAction Stop;$service.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(20));Set-ZapretConfiguration $bin}"+
    "else{New-Service -Name zapret -DisplayName zapret -BinaryPathName $bin -StartupType Automatic | Out-Null};"+
    "New-ItemProperty -LiteralPath 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\zapret' -Name 'zapret-discord-youtube' -Value "+Quote(Path.GetFileNameWithoutExtension(strategy))+" -PropertyType String -Force | Out-Null;"+
-   "Start-Service zapret -ErrorAction Stop;$service=Get-Service zapret;$service.WaitForStatus('Running',[TimeSpan]::FromSeconds(20));'Установлена стратегия: '+"+Quote(strategy)+";Get-Service zapret | Format-Table Name,Status";
+   "Start-Zapret;'Установлена стратегия: '+"+Quote(strategy)+";Get-Service zapret | Format-Table Name,Status";
   return await Power(script,true);
  }
  public static Task<string> Status()=>Power("$s=Get-CimInstance Win32_Service -Filter \"Name='zapret'\";if(!$s){'Служба zapret не установлена'}else{$s | Format-List Name,State,PathName;$p=Get-ItemProperty -LiteralPath 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\zapret';'Стратегия: '+$p.'zapret-discord-youtube'}");
- public static Task<string> Service(string action)=>Power(action=="start"?"if(!(Get-Service zapret -ErrorAction SilentlyContinue)){throw 'Служба не установлена. Выберите стратегию и нажмите Применить стратегию к службе'};Start-Service zapret -ErrorAction Stop;Get-Service zapret | Format-Table Name,Status":"Stop-Service zapret -ErrorAction Stop;$s=Get-Service zapret;$s.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(20));Get-Service zapret | Format-Table Name,Status",true);
+ static string ServiceControlPath()
+ {
+  var path=Path.Combine(AppContext.BaseDirectory,"scripts","service-control.ps1");
+  return File.Exists(path)?path:throw new IOException("Не найден scripts/service-control.ps1. Распакуйте всю папку программы.");
+ }
+ public static Task<string> Service(string action)
+ {
+  if(action is not ("start" or "stop"))throw new ArgumentException("Неизвестное действие службы",nameof(action));
+  return Power("& "+Quote(ServiceControlPath())+" -Action "+Quote(action),true);
+ }
 }

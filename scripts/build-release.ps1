@@ -23,7 +23,7 @@ try {
         -p:DebugType=None -p:DebugSymbols=false -p:RuntimeFrameworkVersion=$RuntimeVersion `
         -warnaserror --source $taskSource -o $taskPackage
     if ($LASTEXITCODE -ne 0) { throw 'Portable publish failed' }
-    foreach ($taskFile in @('gui-for-zapret-fs.exe', 'scripts/test-runner.ps1', 'scripts/update-zapret.ps1', 'scripts/diagnostics.ps1')) {
+    foreach ($taskFile in @('gui-for-zapret-fs.exe', 'scripts/test-runner.ps1', 'scripts/update-zapret.ps1', 'scripts/diagnostics.ps1', 'scripts/service-control.ps1')) {
         if (!(Test-Path -LiteralPath (Join-Path $taskPackage $taskFile) -PathType Leaf)) { throw "Missing release file: $taskFile" }
     }
     $taskInfo = (Get-Item -LiteralPath (Join-Path $taskPackage 'gui-for-zapret-fs.exe')).VersionInfo
