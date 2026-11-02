@@ -212,13 +212,4 @@ try {
   Write-Json 'report.json' $report
  }
 }finally{$lock.Dispose()}
-
-
-
-
-
-
-
-
-
-
+if($report.phase -in @('failed','recovery_required','completed_with_errors')){exit 1}

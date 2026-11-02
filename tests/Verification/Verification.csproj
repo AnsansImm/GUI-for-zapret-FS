@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <StartupObject>ZapretGui.Verification</StartupObject>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../*.cs" Link="Application/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../assets/app.ico" LogicalName="gui-for-zapret-fs.app.ico" />
+  </ItemGroup>
+</Project>
