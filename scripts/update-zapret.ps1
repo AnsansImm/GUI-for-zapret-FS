@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory=$true)][string]$Root,
     [Parameter(Mandatory=$true)][string]$Config,
     [switch]$PrepareOnly,
@@ -37,6 +37,36 @@ function Start-Zapret {
     (Get-Service zapret).WaitForStatus('Running', [TimeSpan]::FromSeconds(20))
 }
 
+function Set-DriverBinary([string]$Binary) {
+    $state = & sc.exe query WinDivert 2>&1
+    $queryCode = $LASTEXITCODE
+    if ($queryCode -eq 1060) { return }
+    if ($queryCode -ne 0) { throw ($state -join ' ') }
+    if (($state -join ' ') -notmatch 'STATE\s*:\s*1\s') {
+        $stopOutput = & sc.exe stop WinDivert 2>&1
+        if ($LASTEXITCODE -ne 0) { throw ($stopOutput -join ' ') }
+        $deadline = [DateTime]::UtcNow.AddSeconds(20)
+        do {
+            $query = & sc.exe query WinDivert 2>&1
+            $queryCode = $LASTEXITCODE
+            if ($queryCode -eq 1060) { break }
+            if ($queryCode -ne 0) { throw ($query -join ' ') }
+            if (($query -join ' ') -match 'STATE\s*:\s*1\s') { break }
+            if ([DateTime]::UtcNow -ge $deadline) { throw 'WinDivert stop timed out' }
+            Start-Sleep -Milliseconds 250
+        } while ($true)
+    }
+    $result = & sc.exe config WinDivert binPath= $Binary 2>&1
+    $configCode = $LASTEXITCODE
+    if ($configCode -eq 1060) {
+        $result = & sc.exe create WinDivert type= kernel start= demand error= normal binPath= $Binary 2>&1
+    } elseif ($configCode -ne 0) {
+        throw ($result -join "`n")
+    }
+    if ($LASTEXITCODE -ne 0) { throw ($result -join "`n") }
+    $actual = [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\WinDivert' -Name ImagePath).ImagePath
+    if ($actual -ne $Binary) { throw 'WinDivert path verification failed' }
+}
 $Root = [IO.Path]::GetFullPath($Root).TrimEnd('\')
 $Config = [IO.Path]::GetFullPath($Config)
 if (!(Test-Path -LiteralPath (Join-Path $Root 'service.bat') -PathType Leaf)) { throw 'Zapret folder not found' }
@@ -47,6 +77,7 @@ if (!$PrepareOnly -and (Test-Path -LiteralPath $journal)) {
     if ($old.binary) {
         $svc = Get-Service zapret -ErrorAction SilentlyContinue
         if ($svc -and $svc.Status -ne 'Stopped') { Stop-Service zapret; $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20)) }
+        if ($old.driverBinary) { Set-DriverBinary $old.driverBinary }
         Set-ServiceBinary $old.binary
         if ($old.running) { Start-Zapret }
     }
@@ -62,7 +93,7 @@ $published = $false
 try {
     if (!$PrepareOnly) {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/Flowseal/zapret-discord-youtube/releases/latest' -Headers @{'User-Agent'='Zapret-GUI';'Cache-Control'='no-cache'} -TimeoutSec 30
+        $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/Flowseal/zapret-discord-youtube/releases/latest' -Headers @{'User-Agent'='gui-for-zapret-fs';'Cache-Control'='no-cache'} -TimeoutSec 30
         $Version = ([string]$release.tag_name).TrimStart('v')
         if ($Version -notmatch '^\d+(\.\d+){1,3}$') { throw 'Unsupported release version' }
         $local = [regex]::Match([IO.File]::ReadAllText((Join-Path $Root 'service.bat')), 'LOCAL_VERSION=([0-9.]+)').Groups[1].Value
@@ -129,13 +160,15 @@ try {
         $running = $service -and $service.State -eq 'Running'
         $configBytes = [IO.File]::ReadAllBytes($Config)
         $configValue = [Text.Encoding]::UTF8.GetString($configBytes).TrimStart([char]0xfeff) | ConvertFrom-Json
-        @{binary=$binary;running=[bool]$running;config=[Convert]::ToBase64String($configBytes)} | ConvertTo-Json | Set-Content -LiteralPath $journal -Encoding UTF8
+        $driverBinary = [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\WinDivert' -Name ImagePath -ErrorAction SilentlyContinue).ImagePath
+        @{driverBinary=$driverBinary;binary=$binary;running=[bool]$running;config=[Convert]::ToBase64String($configBytes)} | ConvertTo-Json | Set-Content -LiteralPath $journal -Encoding UTF8
         $switched = $true
         if ($service -and $service.State -ne 'Stopped') { Stop-Service zapret; (Get-Service zapret).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20)) }
         Move-Item -LiteralPath $new -Destination $destination
         $published = $true
         if ($service) {
             $updatedBinary = [regex]::Replace([Environment]::ExpandEnvironmentVariables($binary), $rootPattern, [Text.RegularExpressions.MatchEvaluator]{param($m) $destination + '\'}, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($driverBinary) { Set-DriverBinary ('\??\' + (Join-Path $destination 'bin\WinDivert64.sys')) }
             Set-ServiceBinary $updatedBinary
             if ($running) { Start-Zapret }
         }
@@ -154,6 +187,7 @@ try {
             if ($service) {
                 $svc = Get-Service zapret
                 if ($svc.Status -ne 'Stopped') { Stop-Service zapret; $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20)) }
+                if ($driverBinary) { Set-DriverBinary $driverBinary }
                 Set-ServiceBinary $binary
                 if ($running) { Start-Zapret }
             }

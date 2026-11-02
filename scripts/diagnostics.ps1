@@ -1,0 +1,24 @@
+﻿param([string]$Root)
+$ErrorActionPreference='Stop'
+$items=New-Object System.Collections.Generic.List[object]
+function Add($title,$state,$detail){$items.Add(@{title=$title;state=$state;detail=$detail})}
+function Check($title,[scriptblock]$body){try{& $body}catch{Add $title 'Unknown' $_.Exception.Message}}
+$services=(& sc.exe query 2>&1 | Out-String);if($LASTEXITCODE){throw $services}
+Check 'BFE' {$q=(& sc.exe query BFE 2>&1 | Out-String);Add 'BFE' $(if($q -match 'RUNNING'){'Passed'}else{'Failed'}) 'Служба базовой фильтрации необходима для Zapret.'}
+Check 'Системный прокси' {$p=Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings';Add 'Системный прокси' $(if($p.ProxyEnable -eq 1){'Warning'}else{'Passed'}) $(if($p.ProxyEnable -eq 1){'Прокси включён: '+$p.ProxyServer+'. Проверьте его настройки.'}else{'Системный прокси отключён.'})}
+Check 'TCP timestamps' {$q=(& netsh interface tcp show global 2>&1 | Out-String);if($LASTEXITCODE){throw $q};Add 'TCP timestamps' $(if($q -match '(?im)^.*timestamps.*enabled'){'Passed'}else{'Warning'}) 'Оригинал проверяет enabled в строке timestamps. Для включения используйте отдельную кнопку.'}
+Check 'AdGuard' {$q=(& tasklist.exe /FI 'IMAGENAME eq AdguardSvc.exe' 2>&1 | Out-String);if($LASTEXITCODE){throw $q};Add 'AdGuard' $(if($q -match 'AdguardSvc.exe'){'Failed'}else{'Passed'}) $(if($q -match 'AdguardSvc.exe'){'Обнаружен AdguardSvc.exe. Возможны проблемы с Discord.'}else{'AdguardSvc.exe не обнаружен.'})}
+foreach($rule in @(@('Killer','Killer'),@('Intel Connectivity','(?im)^.*Intel.*Connectivity.*Network'),@('Check Point','TracSrvWrapper|EPWD'),@('SmartByte','SmartByte'),@('VPN','VPN|HappService'))){$found=$services -match $rule[1];Add $rule[0] $(if($found){if($rule[0] -eq 'VPN'){'Warning'}else{'Failed'}}else{'Passed'}) $(if($found){'Найдены активные службы по признаку '+$rule[1]+'. Оригинальный Zapret предупреждает о возможном конфликте.'}else{'Совпадений среди активных служб нет.'})}
+if([string]::IsNullOrWhiteSpace($Root) -or !(Test-Path -LiteralPath $Root -PathType Container)){Add 'Папка Zapret' 'Warning' 'Выберите папку: проверки пути и файла драйвера пропущены.'}else{
+ Add 'Папка Zapret' 'Passed' $Root
+ Add 'Кириллица в пути' $(if($Root -match '[\u0430-\u044F\u0410-\u042F\u0451\u0401]'){'Warning'}else{'Passed'}) 'При проблемах оригинал рекомендует путь без кириллицы, например C:\zapret.'
+ $inOneDrive=$env:OneDrive -and ($Root.TrimEnd('\')+'\').StartsWith($env:OneDrive.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)
+ Add 'OneDrive' $(if($inOneDrive){'Failed'}else{'Passed'}) $(if($inOneDrive){'Zapret расположен внутри OneDrive. Перенесите его в обычную папку.'}else{'Папка не находится внутри OneDrive.'})
+ $drivers=@(Get-ChildItem -LiteralPath (Join-Path $Root 'bin') -Filter '*.sys' -File -ErrorAction SilentlyContinue)
+ Add 'Файл драйвера' $(if($drivers.Count){'Passed'}else{'Failed'}) $(if($drivers.Count){($drivers.Name -join ', ')}else{'В bin не найдены *.sys, как проверяет оригинальный сценарий.'})
+}
+Check 'Secure DNS' {$path='HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters';$count=0;if(Test-Path $path){$count=@(Get-ChildItem -Recurse $path -ErrorAction Stop | Get-ItemProperty -ErrorAction Stop | Where-Object {$_.DohFlags -gt 0}).Count};Add 'Secure DNS' $(if($count){'Passed'}else{'Warning'}) $(if($count){'Найдены настройки Windows с DohFlags > 0.'}else{'Настройки Windows DoH не найдены. Проверьте защищённый DNS в браузере; эта проверка не определяет настройки браузера.'})}
+Check 'Файл hosts' {$path=Join-Path $env:SystemRoot 'System32\drivers\etc\hosts';$found=$false;if(Test-Path $path){$found=[IO.File]::ReadAllText($path) -match '(?i)youtube.com|youtu.be'};Add 'Файл hosts' $(if($found){'Warning'}else{'Passed'}) $(if($found){'В hosts упоминается youtube.com или youtu.be. Возможны проблемы с YouTube.'}else{'Упоминания YouTube не найдены.'})}
+Check 'WinDivert без winws' {$p=(& tasklist.exe /FI 'IMAGENAME eq winws.exe' 2>&1 | Out-String);$d=(& sc.exe query WinDivert 2>&1 | Out-String);$conflict=($p -notmatch 'winws.exe') -and ($d -match 'RUNNING|STOP_PENDING');Add 'WinDivert без winws' $(if($conflict){'Warning'}else{'Passed'}) $(if($conflict){'WinDivert активен без winws.exe. Возможен другой обход, использующий драйвер.'}else{'Условие конфликта из оригинала не обнаружено.'})}
+Check 'Другие обходы' {$found=@();foreach($name in @('GoodbyeDPI','discordfix_zapret','winws1','winws2')){& sc.exe query $name 2>&1 | Out-Null;if($LASTEXITCODE -eq 0){$found+=$name}elseif($LASTEXITCODE -ne 1060){throw ('Не удалось проверить службу '+$name)}};Add 'Другие обходы' $(if($found.Count){'Failed'}else{'Passed'}) $(if($found.Count){'Обнаружены службы: '+($found -join ', ')}else{'GoodbyeDPI, discordfix_zapret, winws1, winws2 не установлены.'})}
+ConvertTo-Json -InputObject @($items.ToArray()) -Depth 4
