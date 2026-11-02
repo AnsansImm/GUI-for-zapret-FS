@@ -59,3 +59,5 @@ try {
     $allowed = [IO.Path]::GetFullPath((Join-Path $project 'bin/verification')) + [IO.Path]::DirectorySeparatorChar
     if ($resolved.StartsWith($allowed, [StringComparison]::OrdinalIgnoreCase)) { Remove-Item -LiteralPath $resolved -Recurse -Force }
 }
+# The rejected-plan test intentionally leaves LASTEXITCODE=1. Report the suite result.
+exit 0
