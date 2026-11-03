@@ -13,6 +13,25 @@ try {
         [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors) | Out-Null
         Assert ($errors.Count -eq 0) ('Syntax errors in ' + $file.Name)
     }
+    # Exercise the timestamps check with fake netsh output; never change system settings.
+    $tokens = $null; $errors = $null
+    $diagnosticsAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $project 'scripts/diagnostics.ps1'), [ref]$tokens, [ref]$errors)
+    $check = $diagnosticsAst.Find({param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Check' -and $node.CommandElements[1].Value -eq 'TCP timestamps'}, $true)
+    $body = $check.CommandElements[2].ScriptBlock.GetScriptBlock()
+    foreach ($case in @(
+        @('TCP timestamps : enabled', 'Passed'),
+        @('TCP timestamps : disabled', 'Disabled'),
+        @('TCP timestamps : allowed', 'Unknown'),
+        @('Unrecognized output', 'Unknown'),
+        @('TCP timestamps : default', 'Unknown')
+    )) {
+        $actual = & {
+            function netsh { $global:LASTEXITCODE = 0; $case[0] }
+            function Add($title, $state, $detail) { $state }
+            & $body
+        }
+        Assert ($actual -eq $case[1]) ('Incorrect timestamps state for ' + $case[0])
+    }
     $job = Join-Path $fixture 'job'
     New-Item -ItemType Directory -Path $job | Out-Null
     $plan = @{ exe='unused.exe'; strategies=@(@{name='test';args='--filter-tcp=443'}); targets=@(@{name='test';url='https://example.org'}) }

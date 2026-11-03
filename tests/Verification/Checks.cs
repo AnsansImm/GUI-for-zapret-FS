@@ -97,6 +97,25 @@ static class Verification
             Equal(0, Field<ComboBox>(form, "strategies").Items.Count);
             var tabs = Descendants(form).OfType<TabControl>().First(t => t.TabPages.Count > 3);
             Equal(7, tabs.TabPages.Count);
+            var diagnostics = tabs.TabPages.Cast<TabPage>().Single(p => p.Text == "Диагностика");
+            Equal("Проверить систему", string.Join(",", Descendants(diagnostics).OfType<Button>().Select(b => b.Text)));
+            var cards = Field<TableLayoutPanel>(form, "diagnosticCards");
+            foreach (var state in new[] { "Disabled", "Passed", "Unknown", "Warning", "Disabled", "Passed" })
+            {
+                using var results = JsonDocument.Parse(JsonSerializer.Serialize(new[] {
+                    new { title = "BFE", state = "Passed", detail = "Test" },
+                    new { title = "TCP timestamps", state, detail = "Test" }
+                }));
+                typeof(MainForm).GetMethod("ShowDiagnosticCards", Private)!.Invoke(form, new object[] { results.RootElement });
+                var actions = Descendants(cards).OfType<Button>().ToArray();
+                Equal(state == "Disabled" ? 1 : 0, actions.Length);
+                if (actions.Length > 0)
+                {
+                    Equal("Включить TCP timestamps", actions[0].Text);
+                    Equal(cards.GetControlFromPosition(1, 0), actions[0].Parent!.Parent);
+                    Equal(160f, cards.RowStyles[0].Height);
+                }
+            }
             Equal(0, Descendants(tabs.TabPages[0]).OfType<ListBox>().Sum(b => b.Items.Count));
             Equal(0, Descendants(tabs.TabPages[3]).OfType<CheckedListBox>().Single().Items.Count);
             Equal(false, Field<System.Windows.Forms.Timer>(form, "saveTimer").Enabled);
