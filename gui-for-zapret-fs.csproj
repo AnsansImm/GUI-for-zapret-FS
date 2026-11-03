@@ -10,9 +10,9 @@
     <Product>gui-for-zapret-fs</Product>
     <Title>gui-for-zapret-fs</Title>
     <Description>Portable Windows GUI for Flowseal Zapret</Description>
-    <Version>0.2.1</Version>
-    <AssemblyVersion>0.2.1.0</AssemblyVersion>
-    <FileVersion>0.2.1.0</FileVersion>
+    <Version>0.2.2</Version>
+    <AssemblyVersion>0.2.2.0</AssemblyVersion>
+    <FileVersion>0.2.2.0</FileVersion>
     <ApplicationIcon>assets/app.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>

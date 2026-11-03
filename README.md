@@ -1,6 +1,6 @@
 # gui-for-zapret-fs
 
-**Версия 0.2.1 · Windows x64 · C# / .NET 8**
+**Версия 0.2.2 · Windows x64 · C# / .NET 8**
 
 Портативный графический интерфейс для [Flowseal Zapret](https://github.com/Flowseal/zapret-discord-youtube) на Windows. Независимая оболочка: сам Zapret разрабатывается в исходном проекте и скачивается отдельно.
 
@@ -67,7 +67,7 @@ dotnet run --project gui-for-zapret-fs.csproj
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1
 ```
 
-Сценарий создаёт `dist/0.2.1/gui-for-zapret-fs-win-x64-portable.zip` и файл SHA256. При первой автономной сборке необходим доступ к NuGet.
+Сценарий создаёт `dist/0.2.2/gui-for-zapret-fs-win-x64-portable.zip` и файл SHA256. При первой автономной сборке необходим доступ к NuGet.
 Если все пакеты уже загружены, можно собрать из локального кеша: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1 -Offline`.
 
 ## Проверки
@@ -86,6 +86,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/Verify-Service.ps1
 
 Для обновления GUI распакуйте новый архив в отдельную папку и выберите существующую папку Zapret. Пользовательские списки остаются в папке Zapret. При необходимости перенесите `config.json` из предыдущей папки GUI.
 
-GitHub Actions проверяет проект при push/PR. При публикации тега `v0.2.1` сценарий релиза собирает портативный ZIP и загружает его вместе с SHA256 в GitHub Releases.
+GitHub Actions проверяет проект при push/PR. При публикации тега `v0.2.2` сценарий релиза собирает портативный ZIP и загружает его вместе с SHA256 в GitHub Releases.
 
 Совместимость вручную проверялась пользователем со сборкой Flowseal 1.10.4. Локальные настройки, отчёты, папка Zapret и результаты сборки не включаются в репозиторий.
